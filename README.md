@@ -31,6 +31,7 @@ results as you type, each with its file icon and folder.
 | Enter | open the file |
 | Ctrl+Enter | show it in its folder |
 | Ctrl+C | copy its path |
+| right-click, menu key, Shift+F10 | the file's Explorer menu: open with, send to, copy, delete, properties, your shell extensions (Shift+right-click for the extended one) |
 | Esc, or clicking elsewhere | close |
 
 It lives in the tray (right-click: start with Windows, quit). It's plain
@@ -77,7 +78,10 @@ Text files in your user folder up to 1 MB, and up to 10 MB inside git repos,
 minus what git ignores. It leaves out `AppData`, lockfiles, large JSON,
 minified assets and build output. Add more folders to skip to
 `%LOCALAPPDATA%\Qasd\content-skip.txt`, one per line. File names are indexed
-on every fixed drive. `in:` a folder outside your user folder is searched by
+on every fixed drive and on USB sticks and memory cards: a drive plugged in
+is indexed within a second, one unplugged leaves the results, and Qasd lets
+go of a drive as soon as Windows is asked to eject it, so "Safely Remove"
+never finds it in use. `in:` a folder outside your user folder is searched by
 reading its files directly. OneDrive files that are only in the cloud are
 never downloaded by a search.
 
@@ -93,7 +97,8 @@ works either way.
 
 Environment variables:
 
-- `QASD_DRIVES=C,D` limits indexing to these drives (default: every fixed drive).
+- `QASD_DRIVES=C,D` limits indexing to these drives (default: every fixed and removable drive).
+- `QASD_NO_REMOVABLE=1` leaves USB sticks and memory cards out.
 - `QASD_SKIP=D:\VMs;E:\backup` leaves out these folders.
 
 ## API
@@ -149,6 +154,8 @@ fsearch التي تعمل على الماك فقط. تبحث في أسماء ا�
 
 **نافذة البحث:** اضغط **Alt+Q** في أي مكان واكتب اسم الملف، فتظهر النتائج أثناء الكتابة.
 Enter يفتح الملف، وCtrl+Enter يفتح مجلده، وCtrl+C ينسخ مساره، وEsc يغلق النافذة.
+والنقر بالزر الأيمن على أي نتيجة يعرض قائمة الملف نفسها التي تظهر في المستكشف.
+تُفهرس الأقراص الخارجية (USB) تلقائياً عند توصيلها، وتُزال من النتائج عند فصلها.
 تعمل النافذة مع تشغيل ويندوز، وأيقونتها في شريط المهام بجانب الساعة.
 
 ويمكنك البحث من الطرفية أيضاً: اكتب `qasd` متبوعاً بما تبحث عنه:

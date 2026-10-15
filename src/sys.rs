@@ -242,19 +242,31 @@ pub fn memory_bytes() -> u64 {
     if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 { 8 << 30 } else { m.ullTotalPhys }
 }
 
-/// Fixed NTFS/ReFS/FAT drives to index, as internal roots (`/C:`).
+/// Drives to index, as internal roots (`/C:`): fixed ones (internal disks,
+/// most USB hard drives) and removable ones with media in them (USB sticks,
+/// memory cards). Not network shares or optical discs. `QASD_DRIVES=C,D`
+/// overrides; `QASD_NO_REMOVABLE` leaves removable ones out.
 pub fn drives() -> Vec<Vec<u8>> {
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    const DRIVE_REMOVABLE: u32 = 2;
     const DRIVE_FIXED: u32 = 3;
     if let Ok(v) = std::env::var("QASD_DRIVES") {
         return v.split([',', ';', ' ']).filter(|s| !s.is_empty()).map(|s| format!("/{}:", &s[..1].to_ascii_uppercase()).into_bytes()).collect();
     }
+    let removable = std::env::var_os("QASD_NO_REMOVABLE").is_none();
     let mask = unsafe { GetLogicalDrives() };
     (0..26u8)
         .filter(|i| mask & (1 << i) != 0)
         .filter(|i| {
             let root: Vec<u16> = format!("{}:\\", (b'A' + i) as char).encode_utf16().chain([0]).collect();
-            unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
+            match unsafe { GetDriveTypeW(root.as_ptr()) } {
+                DRIVE_FIXED => true,
+                // A card reader with no card in it answers nothing.
+                DRIVE_REMOVABLE if removable => unsafe {
+                    GetVolumeInformationW(root.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0) != 0
+                },
+                _ => false,
+            }
         })
         .map(|i| format!("/{}:", (b'A' + i) as char).into_bytes())
         .collect()

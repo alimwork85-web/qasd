@@ -1,6 +1,6 @@
 [package]
 name = "qasd"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 description = "Whole-disk file search for Windows: fuzzy names, typo tolerance, indexed content grep (a Windows port of fsearch)"
@@ -16,6 +16,18 @@ serde_json = "1"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 unicode-normalization = "0.1"
+
+# COM (the shell's context menu) for the search window.
+[dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_WindowsAndMessaging",
+]
 
 [build-dependencies]
 embed-resource = "3"

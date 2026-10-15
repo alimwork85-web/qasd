@@ -109,8 +109,18 @@ struct Ctx {
     disk: bool,
 }
 
-/// Scan `root` recursively. Listing id 0 is `root` itself.
+/// Scan `root` recursively. Listing id 0 is `root` itself. A whole drive
+/// (one plugged in while running) comes from its MFT when we may.
 pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
+    let r = crate::live::normalize(root);
+    if r.len() == 3 && r[2] == b':' && crate::sys::elevated() && std::env::var_os("QASD_NO_MFT").is_none() {
+        let t = std::time::Instant::now();
+        if let Some(ls) = crate::mft::scan_volume(&r) {
+            let n: usize = ls.iter().map(|l| l.ents.len()).sum();
+            eprintln!("{} {} listed {n} entries by MFT in {:.2?}", crate::query::now_secs(), sys::display(&r), t.elapsed());
+            return ls;
+        }
+    }
     scan_with(root, threads, false)
 }
 

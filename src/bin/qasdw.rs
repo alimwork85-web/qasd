@@ -2,7 +2,8 @@
 //! over whatever you're doing, results update as you type, Enter opens.
 //!
 //! Plain Win32: one popup window drawn by hand (double-buffered GDI) with a
-//! single EDIT control for input. Searches go to the daemon over its named
+//! single EDIT control for input. Right-click (or the menu key) on a
+//! result shows the shell's own menu for the file, as Explorer does. Searches go to the daemon over its named
 //! pipe on a worker thread, so typing never waits on one.
 
 #![windows_subsystem = "windows"]
@@ -20,7 +21,6 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
-use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
@@ -175,6 +175,9 @@ struct App {
     query: String,
     tray_icon: HICON,
     taskbar_created: u32,
+    /// A right-click menu (or what it runs) is up: losing focus to it
+    /// doesn't hide the window.
+    menu_up: bool,
 }
 
 static APP: AtomicPtr<App> = AtomicPtr::new(std::ptr::null_mut());
@@ -524,6 +527,8 @@ fn key(vk: u32) -> bool {
         VK_NEXT => move_sel(MAX_ROWS as isize),
         VK_PRIOR => move_sel(-(MAX_ROWS as isize)),
         VK_BACK if ctrl => delete_word(),
+        VK_APPS => context_menu(a.sel, None),
+        VK_F10 if unsafe { GetKeyState(VK_SHIFT as i32) } < 0 => context_menu(a.sel, None),
         k if ctrl && k == b'C' as u16 && !selection_in_edit() => copy_path(a.sel),
         _ => return false,
     }
@@ -777,6 +782,161 @@ fn tray_menu() {
     }
 }
 
+/// The shell's menu for the file being shown, while it is up: submenus like
+/// "Open with" and "Send to" fill themselves through these messages.
+mod shell_menu {
+    use std::cell::RefCell;
+    use windows::Win32::Foundation::{HWND as WHWND, LPARAM as WLPARAM, LRESULT as WLRESULT, POINT as WPOINT, WPARAM as WWPARAM};
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::{
+        CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, IContextMenu, IContextMenu2,
+        IContextMenu3, IShellFolder, ILFree, SHBindToParent, SHParseDisplayName,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::HMENU as WHMENU;
+    use windows::core::{Interface, PCSTR, PCWSTR};
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<IContextMenu>> = const { RefCell::new(None) };
+    }
+
+    /// (Not in the bindings: the same bit as SEE_MASK_UNICODE.)
+    const CMIC_MASK_UNICODE: u32 = 0x4000;
+
+    /// The first id the shell's items take in our menu.
+    pub const FIRST: u32 = 100;
+
+    pub struct Menu {
+        cm: IContextMenu,
+        pidl: *mut ITEMIDLIST,
+    }
+
+    impl Drop for Menu {
+        fn drop(&mut self) {
+            ACTIVE.with_borrow_mut(|a| *a = None);
+            unsafe { ILFree(Some(self.pidl)) };
+        }
+    }
+
+    /// The shell's items for `path`, added to `menu` from position `at`.
+    pub fn fill(path: &str, hwnd: *mut core::ffi::c_void, menu: *mut core::ffi::c_void, at: u32, extended: bool) -> Option<Menu> {
+        let w: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        unsafe {
+            let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+            SHParseDisplayName(PCWSTR(w.as_ptr()), None, &mut pidl, 0, None).ok()?;
+            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+            let folder: IShellFolder = match SHBindToParent(pidl, Some(&mut child)) {
+                Ok(f) => f,
+                Err(_) => {
+                    ILFree(Some(pidl));
+                    return None;
+                }
+            };
+            let cm: IContextMenu = match folder.GetUIObjectOf(WHWND(hwnd), &[child as *const ITEMIDLIST], None) {
+                Ok(c) => c,
+                Err(_) => {
+                    ILFree(Some(pidl));
+                    return None;
+                }
+            };
+            let flags = CMF_NORMAL | if extended { CMF_EXTENDEDVERBS } else { 0 };
+            if cm.QueryContextMenu(WHMENU(menu), at, FIRST, 0x7FFF, flags).is_err() {
+                ILFree(Some(pidl));
+                return None;
+            }
+            ACTIVE.with_borrow_mut(|a| *a = Some(cm.clone()));
+            Some(Menu { cm, pidl })
+        }
+    }
+
+    impl Menu {
+        /// Run the shell's item `id` (as TrackPopupMenu returned it).
+        pub fn invoke(&self, id: u32, hwnd: *mut core::ffi::c_void, x: i32, y: i32) {
+            let off = (id - FIRST) as usize;
+            let mut info: CMINVOKECOMMANDINFOEX = unsafe { std::mem::zeroed() };
+            info.cbSize = size_of::<CMINVOKECOMMANDINFOEX>() as u32;
+            info.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+            info.hwnd = WHWND(hwnd);
+            info.lpVerb = PCSTR(off as *const u8);
+            info.lpVerbW = PCWSTR(off as *const u16);
+            info.nShow = 1; // SW_SHOWNORMAL
+            info.ptInvoke = WPOINT { x, y };
+            unsafe {
+                let _ = self.cm.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO);
+                // "Copy"/"Cut" put the shell's data on the clipboard: make it
+                // stay there after this menu is gone.
+                let _ = windows::Win32::System::Ole::OleFlushClipboard();
+            }
+        }
+    }
+
+    /// Hand a menu message to the shell's menu while it is up (owner-drawn
+    /// items, submenus filled on demand). Some(result) when it took it.
+    pub fn message(msg: u32, wp: usize, lp: isize) -> Option<isize> {
+        ACTIVE.with_borrow(|a| {
+            let cm = a.as_ref()?;
+            unsafe {
+                if let Ok(cm3) = cm.cast::<IContextMenu3>() {
+                    let mut r = WLRESULT(0);
+                    cm3.HandleMenuMsg2(msg, WWPARAM(wp), WLPARAM(lp), Some(&mut r)).ok()?;
+                    return Some(r.0);
+                }
+                let cm2 = cm.cast::<IContextMenu2>().ok()?;
+                cm2.HandleMenuMsg(msg, WWPARAM(wp), WLPARAM(lp)).ok()?;
+                Some(0)
+            }
+        })
+    }
+}
+
+const CMD_REVEAL: u32 = 1;
+const CMD_COPY_PATH: u32 = 2;
+
+/// The right-click menu for result `i`: ours on top (open its location,
+/// copy its path), then the shell's own, as in Explorer. At the
+/// mouse, or under the row when opened from the keyboard.
+fn context_menu(i: usize, at: Option<POINT>) {
+    let a = app();
+    let Some(it) = a.items.get(i) else { return };
+    let path = it.path.clone();
+    a.sel = i;
+    unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+    let pt = at.unwrap_or_else(|| {
+        let row = (i.saturating_sub(a.top)) as i32;
+        let mut p = POINT { x: scale(62), y: scale(HEAD) + scale(PAD) / 2 + (row + 1) * scale(ROW) - scale(8) };
+        unsafe { ClientToScreen(a.hwnd, &mut p) };
+        p
+    });
+    unsafe {
+        let m = CreatePopupMenu();
+        let reveal = w("فتح موقع الملف");
+        let copy = w("نسخ المسار");
+        AppendMenuW(m, MF_STRING, CMD_REVEAL as usize, reveal.as_ptr());
+        AppendMenuW(m, MF_STRING, CMD_COPY_PATH as usize, copy.as_ptr());
+        AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+        // Shift+right-click: the extended items too, as in Explorer.
+        let extended = GetKeyState(VK_SHIFT as i32) < 0;
+        let shell = shell_menu::fill(&path, a.hwnd, m, 3, extended);
+        a.menu_up = true;
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LAYOUTRTL, pt.x, pt.y, 0, a.hwnd, std::ptr::null()) as u32;
+        match cmd {
+            0 => {}
+            CMD_REVEAL => open(i, true),
+            CMD_COPY_PATH => copy_path(i),
+            id if id >= shell_menu::FIRST => {
+                if let Some(s) = &shell {
+                    s.invoke(id, a.hwnd, pt.x, pt.y);
+                }
+                // The file may be gone or renamed: done here.
+                hide();
+            }
+            _ => {}
+        }
+        a.menu_up = false;
+        drop(shell);
+        DestroyMenu(m);
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if APP.load(Ordering::Relaxed).is_null() {
         return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
@@ -801,7 +961,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_ACTIVATE => {
-            if (wp & 0xFFFF) as u32 == WA_INACTIVE {
+            if (wp & 0xFFFF) as u32 == WA_INACTIVE && !a.menu_up {
                 hide();
             }
             0
@@ -849,6 +1009,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             unsafe { SetFocus(a.edit) };
             0
         }
+        WM_RBUTTONUP => {
+            let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+            if let Some(i) = row_at(y) {
+                let mut p = POINT { x, y };
+                unsafe { ClientToScreen(hwnd, &mut p) };
+                context_menu(i, Some(p));
+            }
+            0
+        }
+        WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR if a.menu_up => match shell_menu::message(msg, wp, lp) {
+            Some(r) => r,
+            None => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+        },
         WM_LBUTTONDBLCLK => {
             let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
             if let Some(i) = row_at(y) {
@@ -910,7 +1083,8 @@ fn main() {
         let bt = std::backtrace::Backtrace::force_capture();
         let _ = std::fs::write(data_dir().join("window.log"), format!("{info}\n{bt}"));
     }));
-    unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    // OLE, not just COM: the shell's "Copy" puts a data object on the clipboard.
+    let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None) };
     let class = w(CLASS);
     // One instance: a second start shows the first one's window.
     let mutex = w(r"Local\QasdSearchWindow");
@@ -1006,6 +1180,7 @@ fn main() {
         query: String::new(),
         tray_icon: small,
         taskbar_created: unsafe { RegisterWindowMessageW(w("TaskbarCreated").as_ptr()) },
+        menu_up: false,
     });
     APP.store(Box::into_raw(app), Ordering::Relaxed);
     unsafe { SendMessageW(edit, WM_SETFONT, crate::app().fonts.input as usize, 1) };
