@@ -114,9 +114,43 @@ pub fn scan(root: &[u8], threads: usize) -> Vec<Listing> {
     scan_with(root, threads, false)
 }
 
-/// The first run's crawl of every drive (see `LISTED`, `HOLD`).
+/// The first run's listing of every drive (see `LISTED`, `HOLD`): each NTFS
+/// drive read straight from its master file table when we may (`mft`,
+/// administrator), else crawled folder by folder.
 pub fn scan_disk(threads: usize) -> Vec<Listing> {
-    scan_with(b"/", threads, true)
+    if !crate::sys::elevated() || std::env::var_os("QASD_NO_MFT").is_some() {
+        return scan_with(b"/", threads, true);
+    }
+    let mut root = Listing::default();
+    let mut out = Vec::new();
+    let mut next = 1u32;
+    for d in sys::drives() {
+        let t = std::time::Instant::now();
+        let (part, how) = match crate::mft::scan_volume(&d) {
+            Some(p) => (p, "MFT"),
+            None => (scan_with(&d, threads, true), "crawl"),
+        };
+        let n: usize = part.iter().map(|l| l.ents.len()).sum();
+        if how == "MFT" {
+            LISTED.fetch_add(n, Ordering::Relaxed);
+        }
+        eprintln!("{} {} listed {n} entries by {how} in {:.2?}", crate::query::now_secs(), sys::display(&d), t.elapsed());
+        // The drive's listings, renumbered after those so far; its root
+        // (listing 0) becomes the root's entry for the drive.
+        let base = next;
+        next += part.len() as u32;
+        add(&mut root, &d[1..], KIND_DIR, 0, 0);
+        root.ents.last_mut().unwrap().child = base;
+        for mut l in part {
+            l.id += base;
+            for e in l.ents.iter_mut().filter(|e| e.child != NONE) {
+                e.child += base;
+            }
+            out.push(l);
+        }
+    }
+    out.push(root);
+    out
 }
 
 fn scan_with(root: &[u8], threads: usize, disk: bool) -> Vec<Listing> {

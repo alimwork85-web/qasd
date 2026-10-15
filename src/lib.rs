@@ -11,9 +11,11 @@ mod engine;
 mod fsevents;
 pub mod index;
 pub mod live;
+pub mod mft;
 pub mod pipe;
 pub mod query;
 pub mod sys;
+pub mod usn;
 pub mod walk;
 
 pub use content::{Case, FileMatches, Grep, GrepResult, Hit};

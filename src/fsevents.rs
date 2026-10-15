@@ -3,13 +3,13 @@
 //!
 //! One thread per fixed drive waits in `ReadDirectoryChangesW` on the drive
 //! root, whole subtree. Each change names a file; its folder is what gets
-//! relisted. A buffer overflow (the drive changed faster than we read) is a
-//! kernel drop: the engine relists the folders modified since its last sync.
+//! relisted. A buffer overflow (the drive changed faster than we read) is
+//! reported as a replayable drop: the engine replays from its last good event.
 //!
-//! Event ids are milliseconds since the unix epoch. Windows keeps no
-//! per-user replayable history here, so a stream asked to start in the past
-//! (a restart, a follower catching up) begins with a "history unavailable"
-//! root event, which the engine answers by relisting the folders changed
+//! Event ids are milliseconds since the unix epoch. A stream asked to start
+//! in the past (a restart, an overflow) replays the change journal (`usn`)
+//! for the folders changed since; where that fails, it begins with a
+//! "history unavailable" root event: the engine relists the folders changed
 //! since its last sync (`relist_changed`), then `HISTORY_DONE`.
 
 use crate::sys;
@@ -98,13 +98,33 @@ pub fn watch(since: u64, _latency: f64, tx: Sender<Vec<Event>>, stream: u32) -> 
             .ok();
         drives.push(Drive { handle: h, thread });
     }
-    // Starting in the past: what changed meanwhile can't be replayed from
-    // here, so the engine relists what changed since its last sync.
+    // Starting in the past: replay what changed meanwhile from each drive's
+    // change journal (`usn`), on its own thread; live events flow already
+    // (relisting a folder twice is harmless). A drive whose journal can't
+    // say makes the engine relist what changed since its last sync.
     let now = current_id();
     if since != 0 && since + 1000 < now {
-        let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: MUST_SCAN_SUBDIRS, id: since, stream }]);
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let mut dirs = Vec::new();
+            let all = sys::drives().iter().all(|d| match crate::usn::changed_since(d, since) {
+                Some(v) => {
+                    dirs.extend(v);
+                    true
+                }
+                None => false,
+            });
+            if all {
+                eprintln!("{} change journal: {} folders changed since {since}, found in {:.2?}", crate::query::now_secs(), dirs.len(), t.elapsed());
+                let _ = tx.send(dirs.into_iter().map(|path| Event { path, flags: 0, id: now, stream }).collect());
+            } else {
+                let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: MUST_SCAN_SUBDIRS, id: since, stream }]);
+            }
+            let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: HISTORY_DONE, id: now, stream }]);
+        });
+    } else {
+        let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: HISTORY_DONE, id: now, stream }]);
     }
-    let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: HISTORY_DONE, id: now, stream }]);
     Stream { stop, drives }
 }
 
@@ -139,8 +159,10 @@ fn follow(h: HANDLE, root: Vec<u8>, tx: Sender<Vec<Event>>, stop: Arc<AtomicBool
         }
         let id = current_id();
         if n == 0 {
-            // Overflow: changes were lost.
-            let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: MUST_SCAN_SUBDIRS | KERNEL_DROPPED, id, stream }]);
+            // Overflow: changes were lost here, but the change journal kept
+            // them: the engine replays from its last good event once the
+            // burst is over (a new stream from then, `watch`).
+            let _ = tx.send(vec![Event { path: b"/".to_vec(), flags: MUST_SCAN_SUBDIRS | USER_DROPPED, id, stream }]);
             continue;
         }
         let mut dirs: Vec<Vec<u8>> = Vec::new();

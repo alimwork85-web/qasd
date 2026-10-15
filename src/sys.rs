@@ -131,7 +131,7 @@ pub fn true_case(p: &[u8]) -> Option<Vec<u8>> {
     r
 }
 
-fn final_path(h: HANDLE) -> Option<Vec<u8>> {
+pub(crate) fn final_path(h: HANDLE) -> Option<Vec<u8>> {
     let mut buf = vec![0u16; 512];
     loop {
         let n = unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) } as usize;

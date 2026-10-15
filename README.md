@@ -39,13 +39,13 @@ light or dark theme and DPI. Files you open rank higher next time.
 
 ## Speed
 
-Measured on this machine: Windows 11, two fixed drives (C: and D:), not
-running as administrator.
+Measured on this machine: Windows 11, C: with about 2 million entries.
 
 | | |
 |---|---:|
-| first full index (2,019,693 entries) | 34 s |
-| restart, catching up on changes since the last run | 3.4 s |
+| first full index, as administrator (read from the MFT) | 5.3 s |
+| first full index, as a normal user (folder crawl) | 9.5 s warm, 34 s cold |
+| restart, catching up on changes since the last run (change journal) | 0.08 s |
 | find a file by name, in the daemon | ~0.8 ms |
 | grep, first page, in the daemon | ~0.3 ms |
 | a CLI search, end to end (mostly Windows process start) | ~28 ms |
@@ -84,9 +84,12 @@ never downloaded by a search.
 ## Administrator rights
 
 As a normal user, Qasd indexes every folder you can open and leaves out the
-few that only administrators can read. To index those too, run the daemon
-elevated: `qasd install --login` from an administrator terminal creates a
-sign-in task with the highest rights, so no UAC prompt appears each time.
+few that only administrators can read. Run the daemon elevated and it indexes
+those too, and builds the index straight from each NTFS drive's master file
+table, several times faster. `qasd install --login` from an administrator
+terminal creates a sign-in task with the highest rights, so no UAC prompt
+appears each time. The change journal (restart catch-up, overflow recovery)
+works either way.
 
 Environment variables:
 
@@ -121,9 +124,9 @@ foreground), `qasd uninstall`, `qasd bench <query>`.
 
 | fsearch on macOS | Qasd on Windows |
 |---|---|
-| `getattrlistbulk` crawl | `FindFirstFileExW` (`FindExInfoBasic`, `LARGE_FETCH`), folders in parallel on rayon |
+| `getattrlistbulk` crawl | as administrator: each NTFS drive's $MFT read raw and parsed (names, parents, sizes, times, links); otherwise `FindFirstFileExW` (`FindExInfoBasic`, `LARGE_FETCH`), folders in parallel on rayon |
 | FSEvents | `ReadDirectoryChangesW` on each drive root, whole subtree |
-| FSEvents replay after a restart | relists only the folders whose mtime moved since the last sync |
+| FSEvents replay after a restart or a dropped burst | the NTFS change journal (USN), read without administrator rights: just the folders changed since; mtime relisting where a journal can't say |
 | unix socket | named pipe, overlapped I/O, ACL limited to the user and SYSTEM |
 | malloc space-efficient mode | mimalloc, with `mi_collect` when idle |
 | launchd LaunchAgent | Task Scheduler sign-in task |
