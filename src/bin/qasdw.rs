@@ -52,6 +52,8 @@ const CMD_SHOW: usize = 100;
 const CMD_EXIT: usize = 101;
 const CMD_STARTUP: usize = 102;
 const EM_SETCUEBANNER: u32 = 0x1501;
+/// WM_MOUSELEAVE (not in these bindings).
+const MOUSE_LEFT: u32 = 0x02A3;
 const EM_GETSEL: u32 = 0x00B0;
 const EM_SETSEL: u32 = 0x00B1;
 
@@ -143,6 +145,8 @@ struct Fonts {
     name: HFONT,
     sub: HFONT,
     glyph: HFONT,
+    /// The preview pane's close mark.
+    glyph_small: HFONT,
     /// Text files in the preview.
     mono: HFONT,
 }
@@ -161,6 +165,7 @@ impl Fonts {
             name: font(s(15), 600, "Segoe UI"),
             sub: font(s(12), 400, "Segoe UI"),
             glyph: font(s(18), 400, glyph_face),
+            glyph_small: font(s(11), 400, glyph_face),
             mono: font(s(12), 400, "Consolas"),
         }
     }
@@ -170,6 +175,7 @@ impl Fonts {
             DeleteObject(self.name);
             DeleteObject(self.sub);
             DeleteObject(self.glyph);
+            DeleteObject(self.glyph_small);
             DeleteObject(self.mono);
         }
     }
@@ -204,6 +210,45 @@ struct App {
     preview: Option<Preview>,
     previews: Sender<(u64, String, bool, i32)>,
     preview_seq: u64,
+    /// The button under the mouse: the preview toggle or its close.
+    hover_btn: Option<Btn>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Btn {
+    /// In the search box: show or hide the preview.
+    Toggle,
+    /// On the preview pane: close it.
+    Close,
+}
+
+/// The preview button, at the right end of the search box.
+fn toggle_rect() -> RECT {
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(app().hwnd, &mut rc) };
+    let (r, top, bottom) = (rc.right - scale(16), scale(14), scale(HEAD) - scale(14));
+    RECT { left: r - (bottom - top), top, right: r, bottom }
+}
+
+/// The close button, at the top corner of the preview pane.
+fn close_rect() -> RECT {
+    let (left, top) = (scale(WIDTH) + scale(22), scale(HEAD) + scale(PAD) / 2 + scale(10));
+    RECT { left, top, right: left + scale(28), bottom: top + scale(28) }
+}
+
+fn inside(r: &RECT, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// The button at a client point, if one is shown there.
+fn btn_at(x: i32, y: i32) -> Option<Btn> {
+    if inside(&toggle_rect(), x, y) {
+        Some(Btn::Toggle)
+    } else if previewing() && inside(&close_rect(), x, y) {
+        Some(Btn::Close)
+    } else {
+        None
+    }
 }
 
 static APP: AtomicPtr<App> = AtomicPtr::new(std::ptr::null_mut());
@@ -550,7 +595,8 @@ fn layout() {
     let x = (r.left + r.right) / 2 - wd / 2;
     unsafe { SetWindowPos(a.hwnd, std::ptr::null_mut(), x, r.top, wd, h, SWP_NOZORDER | SWP_NOACTIVATE) };
     let eh = scale(30);
-    unsafe { MoveWindow(a.edit, scale(52), (scale(HEAD) - eh) / 2, wd - scale(52) - scale(18), eh, 1) };
+    // (Room at the right for the preview button.)
+    unsafe { MoveWindow(a.edit, scale(52), (scale(HEAD) - eh) / 2, wd - scale(52) - scale(64), eh, 1) };
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
 }
 
@@ -928,6 +974,16 @@ fn paint() {
         boxr.left = scale(20);
         boxr.right = scale(48);
         draw_text(dc, "\u{E721}", &mut boxr, DT_CENTER | DT_VCENTER);
+        // The preview button: lit while the preview is on.
+        let tr = toggle_rect();
+        if a.preview_on {
+            round_fill(dc, &tr, t.sel, scale(8));
+        } else if a.hover_btn == Some(Btn::Toggle) {
+            round_fill(dc, &tr, t.line, scale(8));
+        }
+        let mut tg = tr;
+        SetTextColor(dc, if a.preview_on { t.accent } else { t.sub });
+        draw_text(dc, "\u{E8A1}", &mut tg, DT_CENTER | DT_VCENTER);
 
         // Results.
         let mut y = head;
@@ -1068,6 +1124,16 @@ fn paint() {
                 draw_text(dc, &line, &mut lr, DT_LEFT | DT_END_ELLIPSIS);
                 iy += scale(19);
             }
+        }
+
+        // The preview's close button, over its corner.
+        if previewing() {
+            let cr = close_rect();
+            round_fill(dc, &cr, if a.hover_btn == Some(Btn::Close) { t.line } else { t.input }, scale(14));
+            SelectObject(dc, a.fonts.glyph_small);
+            SetTextColor(dc, if a.hover_btn == Some(Btn::Close) { t.text } else { t.sub });
+            let mut c = cr;
+            draw_text(dc, "\u{E711}", &mut c, DT_CENTER | DT_VCENTER);
         }
 
         BitBlt(hdc, 0, 0, cw, ch, dc, 0, 0, SRCCOPY);
@@ -1440,14 +1506,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_MOUSEMOVE => {
             let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
             let h = row_at(x, y);
-            if h != a.hover {
+            let b = btn_at(x, y);
+            if h != a.hover || b != a.hover_btn {
                 a.hover = h;
+                a.hover_btn = b;
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+            // Told when the mouse leaves, to unlight a button.
+            let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+            unsafe { TrackMouseEvent(&mut tme) };
+            0
+        }
+        MOUSE_LEFT => {
+            if a.hover.is_some() || a.hover_btn.is_some() {
+                a.hover = None;
+                a.hover_btn = None;
                 unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
             }
             0
         }
+        WM_SETCURSOR if (lp & 0xFFFF) as u32 == HTCLIENT && a.hover_btn.is_some() => {
+            unsafe { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND)) };
+            1
+        }
         WM_LBUTTONDOWN => {
             let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+            if btn_at(x, y).is_some() {
+                // Either button flips the preview: the toggle both ways, ✕ off.
+                a.hover_btn = None;
+                toggle_preview();
+                unsafe { SetFocus(a.edit) };
+                return 0;
+            }
             if let Some(i) = row_at(x, y) {
                 if a.items[i].history {
                     apply_history(i);
@@ -1648,6 +1738,7 @@ fn main() {
         preview: None,
         previews: ptx,
         preview_seq: 0,
+        hover_btn: None,
     });
     APP.store(Box::into_raw(app), Ordering::Relaxed);
     unsafe { SendMessageW(edit, WM_SETFONT, crate::app().fonts.input as usize, 1) };
