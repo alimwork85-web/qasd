@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-label="Qasd (قصد) - whole-disk file search for Windows, by Ali Alhumedi">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1b2e"/>
+      <stop offset="1" stop-color="#14325a"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa6ff"/>
+      <stop offset="1" stop-color="#2a78d6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="400" rx="24" fill="url(#bg)"/>
+  <g opacity="0.07" stroke="#ffffff" stroke-width="1">
+    <path d="M0 80H1200M0 160H1200M0 240H1200M0 320H1200M200 0V400M400 0V400M600 0V400M800 0V400M1000 0V400"/>
+  </g>
+  <!-- magnifier -->
+  <g transform="translate(110 110)">
+    <circle cx="80" cy="80" r="62" fill="none" stroke="url(#lens)" stroke-width="22"/>
+    <circle cx="80" cy="80" r="44" fill="#5aa6ff" opacity="0.15"/>
+    <path d="M126 126 L182 182" stroke="url(#lens)" stroke-width="30" stroke-linecap="round"/>
+  </g>
+  <g font-family="Segoe UI, Tahoma, Arial, sans-serif" fill="#ffffff">
+    <text x="360" y="150" font-size="84" font-weight="700">Qasd <tspan fill="#5aa6ff">قصد</tspan></text>
+    <text x="362" y="200" font-size="28" fill="#c9d8ee">Whole-disk file search for Windows, in Rust</text>
+    <text x="362" y="240" font-size="24" fill="#c9d8ee">بحث فائق السرعة في كل ملفات ويندوز</text>
+    <g font-size="20" font-weight="600">
+      <rect x="362" y="276" width="166" height="40" rx="20" fill="#2a78d6"/>
+      <text x="445" y="303" text-anchor="middle">Alt+Q window</text>
+      <rect x="540" y="276" width="190" height="40" rx="20" fill="#2a78d6"/>
+      <text x="635" y="303" text-anchor="middle">0.8 ms per search</text>
+      <rect x="742" y="276" width="214" height="40" rx="20" fill="#2a78d6"/>
+      <text x="849" y="303" text-anchor="middle">2M files in 5.3 s</text>
+      <rect x="968" y="276" width="150" height="40" rx="20" fill="#2a78d6"/>
+      <text x="1043" y="303" text-anchor="middle">grep inside</text>
+    </g>
+    <text x="362" y="360" font-size="18" fill="#8fa6c6">by Ali Alhumedi  ·  MIT  ·  github.com/alimwork85-web/qasd</text>
+  </g>
+</svg>

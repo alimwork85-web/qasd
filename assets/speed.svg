@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="300" viewBox="0 0 800 300" role="img" aria-label="Time to index C: (2.1 million entries): folder crawl cold 34 s, folder crawl warm 9.5 s, MFT as administrator 5.3 s, restart with the change journal 0.08 s">
+  <style>
+    .bg { fill: #fcfcfb; }
+    .t1 { fill: #0b0b0b; }
+    .t2 { fill: #52514e; }
+    .mu { fill: #898781; }
+    .grid { stroke: #e1e0d9; }
+    .bar { fill: #2a78d6; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1a1a19; }
+      .t1 { fill: #ffffff; }
+      .t2 { fill: #c3c2b7; }
+      .grid { stroke: #2c2c2a; }
+      .bar { fill: #3987e5; }
+    }
+    text { font-family: Segoe UI, Tahoma, Arial, sans-serif; }
+  </style>
+  <rect class="bg" width="800" height="300" rx="12"/>
+  <text class="t1" x="24" y="38" font-size="18" font-weight="600">Time to index C: (2.1 million files and folders)</text>
+  <text class="t2" x="24" y="62" font-size="14">Seconds, lower is better · Windows 11, measured on one machine</text>
+  <!-- grid: 0..35 s over x 260..740 (13.714 px/s) -->
+  <g class="grid" stroke-width="1">
+    <path d="M260 84V262M397 84V262M534 84V262M671 84V262"/>
+  </g>
+  <g class="mu" font-size="12" text-anchor="middle">
+    <text x="260" y="282">0</text><text x="397" y="282">10</text><text x="534" y="282">20</text><text x="671" y="282">30 s</text>
+  </g>
+  <g font-size="14">
+    <text class="t2" x="248" y="111" text-anchor="end">Folder crawl, cold</text>
+    <path class="bar" d="M260 96H722a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H260z"/>
+    <text class="t1" x="732" y="113" font-weight="600" text-anchor="start">34 s</text>
+
+    <text class="t2" x="248" y="155" text-anchor="end">Folder crawl, warm</text>
+    <path class="bar" d="M260 140H386a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H260z"/>
+    <text class="t1" x="398" y="157" font-weight="600">9.5 s</text>
+
+    <text class="t2" x="248" y="199" text-anchor="end">MFT read (administrator)</text>
+    <path class="bar" d="M260 184H329a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H260z"/>
+    <text class="t1" x="341" y="201" font-weight="600">5.3 s</text>
+
+    <text class="t2" x="248" y="243" text-anchor="end">Restart, change journal</text>
+    <path class="bar" d="M260 228H261a2 2 0 0 1 2 2v20a2 2 0 0 1-2 2H260z"/>
+    <text class="t1" x="273" y="245" font-weight="600">0.08 s</text>
+  </g>
+</svg>

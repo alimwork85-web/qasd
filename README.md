@@ -1,5 +1,13 @@
 # Qasd (قَصْد)
 
+![Qasd (قصد): whole-disk file search for Windows, in Rust, by Ali Alhumedi](assets/banner.svg)
+
+[![Release](https://img.shields.io/github/v/release/alimwork85-web/qasd?color=2a78d6)](https://github.com/alimwork85-web/qasd/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/alimwork85-web/qasd/total?color=2a78d6)](https://github.com/alimwork85-web/qasd/releases)
+![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows)
+![Rust](https://img.shields.io/badge/Rust-fast-dea584?logo=rust)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **Developer: Ali Alhumedi** · [Download](https://github.com/alimwork85-web/qasd/releases/latest) · [Changelog / سجل التغييرات](CHANGELOG.md)
 
 Whole-disk file search for Windows: fuzzy names that forgive typos, and indexed
@@ -53,6 +61,8 @@ light or dark theme and DPI. Files you open rank higher next time.
 ## Speed
 
 Measured on this machine: Windows 11, C: with about 2 million entries.
+
+![Time to index C: folder crawl 34 s cold, 9.5 s warm; MFT 5.3 s; restart with the change journal 0.08 s](assets/speed.svg)
 
 | | |
 |---|---:|

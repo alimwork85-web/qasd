@@ -4,6 +4,38 @@ Qasd — by **Ali Alhumedi**. Built on [fsearch](https://github.com/noahdunnagan
 
 ---
 
+## v0.7.1 — 2026-10-15
+
+### بالعربية
+
+**المشاكل التي حللناها:**
+
+1. **نافذة سوداء تظهر عند تشغيل الكمبيوتر**
+   كانت مهمة تسجيل الدخول تشغّل خدمة الفهرسة `qasd.exe` مباشرة. ولأنه برنامج طرفية، كان ويندوز يفتح له نافذة سوداء تعرض سجلّ الفهرسة وتبقى مفتوحة. صارت المهمة تشغّل `qasdw.exe --daemon`، وهو برنامج لا يفتح نافذة طرفية: يشغّل الخدمة مخفية بصلاحيات المدير نفسها ثم يُغلق. تتم الأرشفة الآن في الخلفية دون أي نافذة، ويُكتب سجلّها في `%LOCALAPPDATA%\Qasd\daemon.log`.
+
+2. **توقّف الخدمة تلقائياً بعد 3 أيام**
+   المهمة المجدولة في ويندوز تُوقف ما تشغّله بعد 72 ساعة افتراضياً، فكانت الخدمة ستتوقف لو بقي الكمبيوتر يعمل 3 أيام متواصلة. الآن تنتهي المهمة نفسها فوراً بعد تشغيل الخدمة، فلا ينطبق عليها هذا الحد.
+
+**التحديث:** ثبّت الإصدار الجديد بـ `install.cmd` كالعادة، فتُحدَّث مهمة تسجيل الدخول تلقائياً.
+
+**أخرى:** صورة تعريفية ورسم بياني لسرعة الفهرسة في صفحة المشروع.
+
+### English
+
+**Fixed:**
+
+1. **A black console window opened at sign-in.**
+   The sign-in task ran the daemon, `qasd.exe serve`, directly; it's a console program, so Windows gave it a console window that showed the indexing log and stayed open. The task now runs `qasdw.exe --daemon`, a window-subsystem program that starts the daemon hidden, with the same administrator rights, and exits. Indexing runs in the background with no window; its log goes to `%LOCALAPPDATA%\Qasd\daemon.log`.
+
+2. **The daemon would have been stopped after 3 days.**
+   Task Scheduler ends what a task runs after 72 hours by default. The task now ends right after starting the daemon, so that limit no longer applies to it.
+
+**Updating:** install the new version with `install.cmd` as usual; the sign-in task is updated automatically.
+
+**Also:** a banner and an indexing-speed chart on the project page.
+
+---
+
 ## v0.7.0 — 2026-10-15
 
 ### بالعربية
