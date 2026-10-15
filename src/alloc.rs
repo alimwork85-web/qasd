@@ -45,7 +45,12 @@ pub fn kept() -> bool {
     KEPT.swap(false, Relaxed)
 }
 
-/// Return freed memory process-wide (after big transient work).
+/// Return freed memory process-wide (after big transient work). Each
+/// thread's heap keeps the pages its allocations came from, even once
+/// another thread freed them, until that thread collects: so every thread
+/// of rayon's global pool (where the MFT records are parsed) collects too,
+/// or ~600 MB stays committed after a build.
 pub fn release() {
     unsafe { libmimalloc_sys::mi_collect(true) };
+    rayon::broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
 }
