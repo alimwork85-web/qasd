@@ -334,7 +334,9 @@ fn install(login: bool) {
     if login && sys::elevated() {
         // At sign-in, with the highest rights: every folder is indexed (from
         // the MFT), and no UAC prompt shows each time.
-        let tr = format!("\"{}\" serve", bin.display());
+        // Through qasdw.exe, which opens no console window; it starts the
+        // daemon hidden and exits (so the task's 72-hour limit never ends it).
+        let tr = if has_window { format!("\"{}\" --daemon", win.display()) } else { format!("\"{}\" serve", bin.display()) };
         let args = ["/Create", "/F", "/TN", TASK, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", &tr];
         if !run_quiet("schtasks", &args) {
             die("schtasks /Create failed");

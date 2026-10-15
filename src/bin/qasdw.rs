@@ -1820,6 +1820,13 @@ fn main() {
         let bt = std::backtrace::Backtrace::force_capture();
         let _ = std::fs::write(data_dir().join("window.log"), format!("{info}\n{bt}"));
     }));
+    // `qasdw --daemon`: what the sign-in task runs. It starts the daemon
+    // (with this process's rights) and exits; being a window-subsystem exe,
+    // no console window shows at sign-in.
+    if std::env::args().any(|a| a == "--daemon") {
+        let _ = qasd::pipe::connect_or_start(&data_dir(), &daemon_exe());
+        return;
+    }
     // OLE, not just COM: the shell's "Copy" puts a data object on the clipboard.
     let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None) };
     let class = w(CLASS);
