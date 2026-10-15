@@ -349,6 +349,12 @@ impl Engine {
         }
     }
 
+    /// Total bytes of the files under folder `path` (index form, `/C:/x`),
+    /// from the index alone. None while no index is loaded.
+    pub fn folder_size(&self, path: &[u8]) -> Option<u64> {
+        self.s.live.read().unwrap().as_ref().map(|l| l.tree_size(path))
+    }
+
     /// Name search.
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
         WARM_UNTIL.store(0, Ordering::Relaxed);

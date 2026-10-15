@@ -32,6 +32,15 @@ results as you type, each with its file icon and folder.
 | Ctrl+Enter | show it in its folder |
 | Ctrl+C | copy its path |
 | right-click, menu key, Shift+F10 | the file's Explorer menu: open with, send to, copy, delete, properties, your shell extensions (Shift+right-click for the extended one) |
+| drag a result | drop the file into any program: a mail, an editor, a chat, a folder |
+| Ctrl+P | show or hide the preview pane |
+| empty box | your recent searches: Enter runs one again, Delete removes it |
+
+Each result shows its size and date; a folder's size is everything in it,
+summed from the index (no disk access). The preview pane shows the selected
+file's thumbnail (images, videos, PDFs, folders), a text file's first lines,
+or its icon, type, size and date. Files only in OneDrive's cloud are never
+downloaded to preview them.
 | Esc, or clicking elsewhere | close |
 
 It lives in the tray (right-click: start with Windows, quit). It's plain
@@ -155,6 +164,9 @@ fsearch التي تعمل على الماك فقط. تبحث في أسماء ا�
 **نافذة البحث:** اضغط **Alt+Q** في أي مكان واكتب اسم الملف، فتظهر النتائج أثناء الكتابة.
 Enter يفتح الملف، وCtrl+Enter يفتح مجلده، وCtrl+C ينسخ مساره، وEsc يغلق النافذة.
 والنقر بالزر الأيمن على أي نتيجة يعرض قائمة الملف نفسها التي تظهر في المستكشف.
+اسحب أي نتيجة وأفلتها في برنامج آخر. وتعرض كل نتيجة حجمها وتاريخها، وحجم المجلد يشمل كل ما فيه.
+لوحة المعاينة تعرض الصورة أو أول أسطر الملف النصي، ويُظهرها Ctrl+P أو يخفيها.
+وعندما يكون مربع البحث فارغاً تظهر عمليات البحث السابقة.
 تُفهرس الأقراص الخارجية (USB) تلقائياً عند توصيلها، وتُزال من النتائج عند فصلها.
 تعمل النافذة مع تشغيل ويندوز، وأيقونتها في شريط المهام بجانب الساعة.
 

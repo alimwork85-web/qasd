@@ -104,8 +104,10 @@ fn handle(mut conn: Conn, cx: &Ctx) {
     let mut out = Vec::new();
     for line in BufReader::new(r).lines() {
         let Ok(line) = line else { return };
+        // An empty line is the end of the client's requests (a pipe has no
+        // half-close; see `pipe::Conn::shutdown`): close once it's answered.
         if line.trim().is_empty() {
-            continue;
+            return;
         }
         out.clear();
         respond(&line, cx, &mut out);
@@ -136,13 +138,18 @@ fn respond(line: &str, cx: &Ctx, out: &mut Vec<u8>) {
         Ok(Reply::Hits(found, took_us, next, annotate)) => {
             let hits = found
                 .iter()
-                .map(|f| Hit {
-                    git: annotate.then(|| cx.git.status(&qasd::sys::bytes(&f.path)).and_then(git::word)).flatten(),
-                    kind: kind_name(f.kind),
-                    mtime: f.mtime,
-                    path: std::borrow::Cow::Owned(String::from_utf8_lossy(&qasd::sys::bytes(&f.path)).into_owned()),
-                    score: f.score,
-                    size: f.size,
+                .map(|f| {
+                    let p = qasd::sys::bytes(&f.path);
+                    // A folder's size: its files' sizes summed from the index.
+                    let size = if f.kind & 3 == KIND_DIR { cx.engine.folder_size(&p).unwrap_or(0) } else { f.size };
+                    Hit {
+                        git: annotate.then(|| cx.git.status(&p).and_then(git::word)).flatten(),
+                        kind: kind_name(f.kind),
+                        mtime: f.mtime,
+                        path: std::borrow::Cow::Owned(String::from_utf8_lossy(&p).into_owned()),
+                        score: f.score,
+                        size,
+                    }
                 })
                 .collect();
             put(out, &Hits { hits, id, next, ok: true, took_us })

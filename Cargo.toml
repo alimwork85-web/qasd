@@ -27,6 +27,7 @@ features = [
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
 ]
 
 [build-dependencies]
@@ -59,6 +60,7 @@ features = [
   "Win32_UI_Shell_Common",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
+  "Win32_System_Time",
 ]
 
 [profile.release]

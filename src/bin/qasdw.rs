@@ -3,8 +3,11 @@
 //!
 //! Plain Win32: one popup window drawn by hand (double-buffered GDI) with a
 //! single EDIT control for input. Right-click (or the menu key) on a
-//! result shows the shell's own menu for the file, as Explorer does. Searches go to the daemon over its named
-//! pipe on a worker thread, so typing never waits on one.
+//! result shows the shell's own menu for the file, as Explorer does; a
+//! result drags out to any program; a pane previews the selected file
+//! (thumbnail or first lines); an empty box lists your recent searches.
+//! Searches go to the daemon over its named pipe on a worker thread, and
+//! previews are made on another, so typing never waits on either.
 
 #![windows_subsystem = "windows"]
 
@@ -40,6 +43,8 @@ const WM_RESULTS: u32 = WM_APP + 1;
 const WM_TRAY: u32 = WM_APP + 2;
 /// Another qasdw was started: show this one.
 const WM_SHOW_ME: u32 = WM_APP + 3;
+/// A preview is ready (lparam: Box<Preview>).
+const WM_PREVIEW: u32 = WM_APP + 4;
 const TIMER_RETRY: usize = 1;
 const LIMIT: usize = 60;
 const MAX_ROWS: usize = 8;
@@ -63,6 +68,12 @@ struct Item {
     is_dir: bool,
     /// A grep hit: line number and text.
     line: Option<(u64, String)>,
+    /// Bytes (a folder: everything in it), if known.
+    size: Option<u64>,
+    /// Last write, unix seconds (0: unknown).
+    mtime: u32,
+    /// A past search (shown while the box is empty): `name` is the query.
+    history: bool,
 }
 
 struct Answer {
@@ -132,6 +143,8 @@ struct Fonts {
     name: HFONT,
     sub: HFONT,
     glyph: HFONT,
+    /// Text files in the preview.
+    mono: HFONT,
 }
 
 fn font(px: i32, weight: i32, face: &str) -> HFONT {
@@ -143,7 +156,13 @@ impl Fonts {
     fn new(dpi: u32) -> Fonts {
         let s = |px: i32| px * dpi as i32 / 96;
         let glyph_face = if Path::new(r"C:\Windows\Fonts\SegoeIcons.ttf").exists() { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
-        Fonts { input: font(s(20), 400, "Segoe UI"), name: font(s(15), 600, "Segoe UI"), sub: font(s(12), 400, "Segoe UI"), glyph: font(s(18), 400, glyph_face) }
+        Fonts {
+            input: font(s(20), 400, "Segoe UI"),
+            name: font(s(15), 600, "Segoe UI"),
+            sub: font(s(12), 400, "Segoe UI"),
+            glyph: font(s(18), 400, glyph_face),
+            mono: font(s(12), 400, "Consolas"),
+        }
     }
     fn free(&self) {
         unsafe {
@@ -151,6 +170,7 @@ impl Fonts {
             DeleteObject(self.name);
             DeleteObject(self.sub);
             DeleteObject(self.glyph);
+            DeleteObject(self.mono);
         }
     }
 }
@@ -178,6 +198,12 @@ struct App {
     /// A right-click menu (or what it runs) is up: losing focus to it
     /// doesn't hide the window.
     menu_up: bool,
+    /// The preview pane is wanted (Ctrl+P; remembered).
+    preview_on: bool,
+    /// What it shows now, and where previews are asked for.
+    preview: Option<Preview>,
+    previews: Sender<(u64, String, bool, i32)>,
+    preview_seq: u64,
 }
 
 static APP: AtomicPtr<App> = AtomicPtr::new(std::ptr::null_mut());
@@ -195,6 +221,10 @@ fn scale(v: i32) -> i32 {
 
 // Layout, at 96 DPI.
 const WIDTH: i32 = 720;
+/// The preview pane, right of the results.
+const PREVIEW_W: i32 = 360;
+/// Rows of height the list keeps while the preview shows (room for it).
+const PREVIEW_ROWS: i32 = 7;
 const HEAD: i32 = 60;
 const ROW: i32 = 50;
 const FOOT: i32 = 30;
@@ -267,13 +297,16 @@ fn item(path: &str, is_dir: bool, line: Option<(u64, String)>) -> Item {
     let cut = path.rfind('\\').map_or(0, |i| i + 1);
     let (dir, name) = (path[..cut.saturating_sub(1).max(if cut == 3 { 3 } else { 0 })].to_string(), path[cut..].to_string());
     let dir = if dir.is_empty() { path[..cut].to_string() } else { dir };
-    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, line }
+    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, line, size: None, mtime: 0, history: false }
 }
 
 fn items(v: &Value) -> Vec<Item> {
     let mut out = Vec::new();
     for h in v["hits"].as_array().into_iter().flatten() {
-        out.push(item(h["path"].as_str().unwrap_or(""), h["kind"] == "dir", None));
+        let mut it = item(h["path"].as_str().unwrap_or(""), h["kind"] == "dir", None);
+        it.size = h["size"].as_u64();
+        it.mtime = h["mtime"].as_u64().unwrap_or(0) as u32;
+        out.push(it);
     }
     for f in v["files"].as_array().into_iter().flatten() {
         let p = f["path"].as_str().unwrap_or("");
@@ -284,6 +317,185 @@ fn items(v: &Value) -> Vec<Item> {
     }
     out.truncate(LIMIT * 3);
     out
+}
+
+/// "1.4 MB": bytes for people, Western digits.
+fn human_size(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let (mut v, mut u) = (n as f64, 0);
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else if v < 10.0 {
+        format!("{v:.1} {}", UNITS[u])
+    } else {
+        format!("{v:.0} {}", UNITS[u])
+    }
+}
+
+/// "2026-10-14 23:05" in local time, Western digits.
+fn local_time(secs: u32) -> String {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    if secs == 0 {
+        return String::new();
+    }
+    let t = (secs as u64 + 11_644_473_600) * 10_000_000;
+    let ft = FILETIME { dwLowDateTime: t as u32, dwHighDateTime: (t >> 32) as u32 };
+    let (mut utc, mut local): (SYSTEMTIME, SYSTEMTIME) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+    unsafe {
+        if FileTimeToSystemTime(&ft, &mut utc) == 0 || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+            return String::new();
+        }
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute)
+}
+
+/// Searches you acted on (opened, copied, dragged a result of), newest
+/// first, kept in history.txt next to the index.
+mod history {
+    const MAX: usize = 30;
+
+    fn file() -> std::path::PathBuf {
+        super::data_dir().join("history.txt")
+    }
+
+    pub fn load() -> Vec<String> {
+        std::fs::read_to_string(file()).map(|s| s.lines().filter(|l| !l.trim().is_empty()).take(MAX).map(str::to_string).collect()).unwrap_or_default()
+    }
+
+    fn save(v: &[String]) {
+        let _ = std::fs::create_dir_all(super::data_dir());
+        let _ = std::fs::write(file(), v.join("\n") + "\n");
+    }
+
+    pub fn remember(q: &str) {
+        let q = q.trim();
+        if q.is_empty() {
+            return;
+        }
+        let mut v = load();
+        v.retain(|x| x != q);
+        v.insert(0, q.to_string());
+        v.truncate(MAX);
+        save(&v);
+    }
+
+    pub fn forget(q: &str) {
+        let mut v = load();
+        v.retain(|x| x != q);
+        save(&v);
+    }
+}
+
+/// The preview pane's content for one file, made on the preview thread.
+struct Preview {
+    seq: u64,
+    path: String,
+    /// A thumbnail or big icon (32-bit, premultiplied alpha), or null.
+    bitmap: HBITMAP,
+    /// A text file's first lines.
+    text: Option<Vec<String>>,
+    /// "Text Document", "JPEG image"...: Explorer's type name.
+    kind: String,
+}
+
+/// The newest preview asked for: the preview thread skips older ones.
+static LATEST_PREVIEW: AtomicU64 = AtomicU64::new(0);
+
+/// Extensions read as text, whatever their contents look like.
+const TEXT_EXTS: &[&str] = &[
+    "txt", "md", "markdown", "rs", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "json", "jsonc", "toml", "yaml", "yml", "xml", "html", "htm",
+    "css", "scss", "less", "c", "h", "cc", "cpp", "hpp", "cs", "java", "kt", "go", "rb", "php", "sh", "bash", "ps1", "psm1", "bat", "cmd", "ini",
+    "cfg", "conf", "log", "csv", "tsv", "sql", "swift", "lua", "r", "m", "vue", "svelte", "dart", "gradle", "properties", "env", "gitignore",
+    "editorconfig", "srt", "vtt", "tex", "rst", "lock", "svg",
+];
+
+/// Make the preview of `path` (a Windows path) at about `px` pixels wide.
+fn make_preview(seq: u64, path: &str, is_dir: bool, px: i32) -> Preview {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY};
+    let mut p = Preview { seq, path: path.to_string(), bitmap: std::ptr::null_mut(), text: None, kind: String::new() };
+    let wpath = w(path);
+    // Explorer's type name.
+    let mut fi: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    if unsafe { SHGetFileInfoW(wpath.as_ptr(), 0, &mut fi, size_of::<SHFILEINFOW>() as u32, SHGFI_TYPENAME) } != 0 {
+        let n = fi.szTypeName.iter().position(|&c| c == 0).unwrap_or(0);
+        p.kind = String::from_utf16_lossy(&fi.szTypeName[..n]);
+    }
+    let attrs = unsafe { windows_sys::Win32::Storage::FileSystem::GetFileAttributesW(wpath.as_ptr()) };
+    // A OneDrive file only in the cloud: never download it to preview it.
+    let online_only = attrs != u32::MAX && attrs & (0x0040_0000 | 0x0000_1000) != 0;
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    if !is_dir && !online_only && TEXT_EXTS.contains(&ext.as_str()) {
+        p.text = read_text(path);
+        if p.text.is_some() {
+            return p;
+        }
+    }
+    unsafe {
+        if let Ok(f) = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(windows::core::PCWSTR(wpath.as_ptr()), None) {
+            let size = SIZE { cx: px, cy: px };
+            // The thumbnail itself, at the size it has if smaller: asked
+            // "thumbnail or icon" for more pixels than an image has, the
+            // shell gives the file type's icon instead. No thumbnail (or a
+            // cloud-only file): the big icon.
+            let thumb = if online_only { None } else { f.GetImage(size, SIIGBF_THUMBNAILONLY).ok() };
+            if let Some(b) = thumb.or_else(|| f.GetImage(size, SIIGBF_ICONONLY).ok()).or_else(|| f.GetImage(size, SIIGBF_RESIZETOFIT).ok()) {
+                p.bitmap = b.0 as HBITMAP;
+            }
+        }
+    }
+    p
+}
+
+/// The first lines of a text file (UTF-8, or UTF-16 with its mark), if it
+/// reads as text. Opened without recalling cloud files.
+fn read_text(path: &str) -> Option<Vec<String>> {
+    use std::io::Read;
+    let mut f = qasd::content::open_regular(&sys::from_user(path))?;
+    let mut buf = vec![0u8; 16 * 1024];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    let text = if buf.starts_with(&[0xFF, 0xFE]) {
+        let w: Vec<u16> = buf[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&w)
+    } else {
+        if buf.contains(&0) {
+            return None;
+        }
+        String::from_utf8_lossy(buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf)).into_owned()
+    };
+    Some(text.lines().take(80).map(|l| l.replace('\t', "    ").chars().take(240).collect()).collect())
+}
+
+fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
+    // Thumbnail providers are COM objects.
+    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+    while let Ok((seq, path, is_dir, px)) = rx.recv() {
+        // Arrow keys held down: only the last one matters.
+        if seq < LATEST_PREVIEW.load(Ordering::Relaxed) {
+            continue;
+        }
+        let p = Box::into_raw(Box::new(make_preview(seq, &path, is_dir, px)));
+        if unsafe { PostMessageW(hwnd as HWND, WM_PREVIEW, 0, p as isize) } == 0 {
+            let p = unsafe { Box::from_raw(p) };
+            if !p.bitmap.is_null() {
+                unsafe { DeleteObject(p.bitmap) };
+            }
+        }
+    }
+}
+
+/// The history as rows, for an empty search box.
+fn history_items() -> Vec<Item> {
+    history::load()
+        .into_iter()
+        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, line: None, size: None, mtime: 0, history: true })
+        .collect()
 }
 
 /// "3 نتائج": Arabic counted nouns, Western digits.
@@ -308,23 +520,84 @@ fn rows_shown() -> usize {
     app().items.len().min(MAX_ROWS)
 }
 
+/// The preview pane shows: wanted, and a file (not a past search) selected.
+fn previewing() -> bool {
+    let a = app();
+    a.preview_on && a.items.get(a.sel).is_some_and(|it| !it.history)
+}
+
+fn total_width() -> i32 {
+    scale(WIDTH) + if previewing() { scale(PREVIEW_W) } else { 0 }
+}
+
 fn window_height() -> i32 {
     let a = app();
-    let rows = rows_shown() as i32;
+    let mut rows = rows_shown() as i32;
+    if previewing() {
+        rows = rows.max(PREVIEW_ROWS);
+    }
     let body = if rows > 0 { rows * ROW + PAD } else { 0 };
     let foot = if a.query.trim().is_empty() && a.items.is_empty() { 0 } else { FOOT };
     scale(HEAD + body + foot)
 }
 
+/// Size the window to its contents, keeping it centered where it is.
 fn layout() {
     let a = app();
     let mut r: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(a.hwnd, &mut r) };
-    let h = window_height();
-    unsafe { SetWindowPos(a.hwnd, std::ptr::null_mut(), r.left, r.top, scale(WIDTH), h, SWP_NOZORDER | SWP_NOACTIVATE) };
+    let (wd, h) = (total_width(), window_height());
+    let x = (r.left + r.right) / 2 - wd / 2;
+    unsafe { SetWindowPos(a.hwnd, std::ptr::null_mut(), x, r.top, wd, h, SWP_NOZORDER | SWP_NOACTIVATE) };
     let eh = scale(30);
-    unsafe { MoveWindow(a.edit, scale(52), (scale(HEAD) - eh) / 2, scale(WIDTH) - scale(52) - scale(18), eh, 1) };
+    unsafe { MoveWindow(a.edit, scale(52), (scale(HEAD) - eh) / 2, wd - scale(52) - scale(18), eh, 1) };
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+}
+
+/// Ask for the selected file's preview, unless it is shown already.
+fn request_preview() {
+    let a = app();
+    if !previewing() {
+        return;
+    }
+    let it = &a.items[a.sel];
+    if a.preview.as_ref().is_some_and(|p| p.path == it.path) {
+        return;
+    }
+    a.preview_seq += 1;
+    LATEST_PREVIEW.store(a.preview_seq, Ordering::Relaxed);
+    let _ = a.previews.send((a.preview_seq, it.path.clone(), it.is_dir, scale(PREVIEW_W - 40)));
+}
+
+fn on_preview(p: Box<Preview>) {
+    let a = app();
+    if p.seq != a.preview_seq {
+        if !p.bitmap.is_null() {
+            unsafe { DeleteObject(p.bitmap) };
+        }
+        return;
+    }
+    if let Some(old) = a.preview.take()
+        && !old.bitmap.is_null()
+    {
+        unsafe { DeleteObject(old.bitmap) };
+    }
+    a.preview = Some(*p);
+    unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+}
+
+/// Settings kept next to the index: `preview=0|1`.
+fn load_settings() -> bool {
+    std::fs::read_to_string(data_dir().join("settings.txt")).map_or(true, |s| !s.lines().any(|l| l.trim() == "preview=0"))
+}
+
+fn toggle_preview() {
+    let a = app();
+    a.preview_on = !a.preview_on;
+    let _ = std::fs::write(data_dir().join("settings.txt"), format!("preview={}
+", a.preview_on as u8));
+    layout();
+    request_preview();
 }
 
 fn set_fonts(dpi: u32) {
@@ -355,7 +628,7 @@ fn show() {
         set_theme();
     }
     let wr = mi.rcWork;
-    let width = scale(WIDTH);
+    let width = total_width();
     let x = wr.left + (wr.right - wr.left - width) / 2;
     let y = wr.top + (wr.bottom - wr.top) / 4;
     unsafe {
@@ -417,19 +690,32 @@ fn on_results(ans: Box<Answer>) {
             }
             a.items.clear();
         }
+        None if a.query.trim().is_empty() => {
+            a.items = history_items();
+            a.status = if a.items.is_empty() { String::new() } else { "عمليات البحث الأخيرة".into() };
+        }
         None => {
             a.items = ans.items;
-            a.status = if a.query.trim().is_empty() {
-                String::new()
-            } else {
-                format!("{}  ·  {:.1} ms", results_ar(a.items.len()), ans.took.as_secs_f64() * 1000.0)
-            };
+            a.status = format!("{}  ·  {:.1} ms", results_ar(a.items.len()), ans.took.as_secs_f64() * 1000.0);
         }
     }
     a.sel = 0;
     a.top = 0;
     a.hover = None;
     layout();
+    request_preview();
+}
+
+/// Put a past search back in the box (it runs as typed).
+fn apply_history(i: usize) {
+    let a = app();
+    let Some(q) = a.items.get(i).filter(|it| it.history).map(|it| it.name.clone()) else { return };
+    let ws = w(&q);
+    let n = q.encode_utf16().count();
+    unsafe {
+        SetWindowTextW(a.edit, ws.as_ptr());
+        SendMessageW(a.edit, EM_SETSEL, n, n as isize);
+    }
 }
 
 fn ensure_visible() {
@@ -450,11 +736,16 @@ fn move_sel(d: isize) {
     a.sel = (a.sel as isize + d).clamp(0, n - 1) as usize;
     ensure_visible();
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+    request_preview();
 }
 
 fn open(i: usize, reveal: bool) {
     let a = app();
     let Some(it) = a.items.get(i) else { return };
+    if it.history {
+        apply_history(i);
+        return;
+    }
     let p = w(&it.path);
     unsafe {
         if reveal {
@@ -468,14 +759,16 @@ fn open(i: usize, reveal: bool) {
             ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), p.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
         }
     }
-    // Ranked higher next time ("boost").
+    // Ranked higher next time ("boost"), and the search remembered.
     let _ = a.jobs.send(Job::Opened(it.path.clone()));
+    history::remember(&a.query);
     hide();
 }
 
 fn copy_path(i: usize) {
     let a = app();
-    let Some(it) = a.items.get(i) else { return };
+    let Some(it) = a.items.get(i).filter(|it| !it.history) else { return };
+    history::remember(&a.query);
     let text: Vec<u16> = it.path.encode_utf16().chain([0]).collect();
     unsafe {
         if OpenClipboard(a.hwnd) == 0 {
@@ -527,6 +820,11 @@ fn key(vk: u32) -> bool {
         VK_NEXT => move_sel(MAX_ROWS as isize),
         VK_PRIOR => move_sel(-(MAX_ROWS as isize)),
         VK_BACK if ctrl => delete_word(),
+        VK_DELETE if a.query.is_empty() && a.items.get(a.sel).is_some_and(|it| it.history) => {
+            history::forget(&a.items[a.sel].name);
+            search();
+        }
+        k if ctrl && k == b'P' as u16 => toggle_preview(),
         VK_APPS => context_menu(a.sel, None),
         VK_F10 if unsafe { GetKeyState(VK_SHIFT as i32) } < 0 => context_menu(a.sel, None),
         k if ctrl && k == b'C' as u16 && !selection_in_edit() => copy_path(a.sel),
@@ -612,6 +910,8 @@ fn paint() {
     let mut rc: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetClientRect(a.hwnd, &mut rc) };
     let (cw, ch) = (rc.right, rc.bottom);
+    // The results take the left WIDTH; the preview, if any, the rest.
+    let lw = if previewing() { scale(WIDTH) } else { cw };
     unsafe {
         let dc = CreateCompatibleDC(hdc);
         let bmp = CreateCompatibleBitmap(hdc, cw, ch);
@@ -635,10 +935,11 @@ fn paint() {
             fill(dc, &RECT { left: 0, top: y, right: cw, bottom: y + 1 }, t.line);
             y += scale(PAD) / 2;
         }
+        let list_top = y;
         let end = (a.top + MAX_ROWS).min(a.items.len());
         for i in a.top..end {
             let it = &a.items[i];
-            let row = RECT { left: scale(8), top: y, right: cw - scale(8), bottom: y + scale(ROW) };
+            let row = RECT { left: scale(8), top: y, right: lw - scale(8), bottom: y + scale(ROW) };
             if i == a.sel {
                 round_fill(dc, &row, t.sel, scale(10));
                 let bar = RECT { left: row.left, top: row.top + scale(14), right: row.left + scale(3), bottom: row.bottom - scale(14) };
@@ -646,7 +947,25 @@ fn paint() {
             } else if a.hover == Some(i) {
                 round_fill(dc, &row, t.input, scale(10));
             }
-            let isz = scale(32).min(32 * a.dpi as i32 / 96);
+            let left = scale(62);
+            let mut right = lw - scale(20);
+            if it.history {
+                // A past search: a clock, the query, and what Enter does.
+                SelectObject(dc, a.fonts.glyph);
+                SetTextColor(dc, t.sub);
+                let mut gr = RECT { left: scale(22), top: y, right: scale(50), bottom: y + scale(ROW) };
+                draw_text(dc, "\u{E81C}", &mut gr, DT_CENTER | DT_VCENTER);
+                SelectObject(dc, a.fonts.name);
+                SetTextColor(dc, t.text);
+                let mut r1 = RECT { left, top: y + scale(6), right, bottom: y + scale(27) };
+                draw_text(dc, &it.name, &mut r1, DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(dc, a.fonts.sub);
+                SetTextColor(dc, t.sub);
+                let mut r2 = RECT { left, top: y + scale(27), right, bottom: y + scale(45) };
+                draw_text(dc, "بحث سابق", &mut r2, DT_LEFT | DT_RTLREADING);
+                y += scale(ROW);
+                continue;
+            }
             let idx = icon_index(it);
             if idx >= 0 && a.images != 0 {
                 let hi = ImageList_GetIcon(a.images, idx, ILD_NORMAL);
@@ -656,9 +975,17 @@ fn paint() {
                     DestroyIcon(hi);
                 }
             }
-            let _ = isz;
-            let left = scale(62);
-            let right = cw - scale(20);
+            // Size and date at the right of the row (not for a grep line).
+            if it.line.is_none() && (it.size.is_some() || it.mtime != 0) {
+                let col = scale(140);
+                SelectObject(dc, a.fonts.sub);
+                SetTextColor(dc, t.sub);
+                let mut s1 = RECT { left: right - col, top: y + scale(8), right, bottom: y + scale(27) };
+                draw_text(dc, &it.size.map(human_size).unwrap_or_default(), &mut s1, DT_RIGHT);
+                let mut s2 = RECT { left: right - col, top: y + scale(27), right, bottom: y + scale(45) };
+                draw_text(dc, &local_time(it.mtime), &mut s2, DT_RIGHT);
+                right -= col + scale(10);
+            }
             // Name, then the folder (or a grep hit's line).
             SelectObject(dc, a.fonts.name);
             SetTextColor(dc, t.text);
@@ -675,16 +1002,71 @@ fn paint() {
         }
 
         // Footer: count and keys, read right to left.
-        if ch - y >= scale(FOOT) - 2 {
-            let fy = ch - scale(FOOT);
+        let fy = ch - scale(FOOT);
+        let has_foot = !(a.query.trim().is_empty() && a.items.is_empty());
+        if has_foot {
             fill(dc, &RECT { left: 0, top: fy, right: cw, bottom: fy + 1 }, t.line);
             SelectObject(dc, a.fonts.sub);
             SetTextColor(dc, t.sub);
             let mut fr = RECT { left: scale(16), top: fy, right: cw - scale(16), bottom: ch };
             draw_text(dc, &a.status, &mut fr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
-            if !a.items.is_empty() {
-                let mut kr = RECT { left: scale(16), top: fy, right: cw / 2 + scale(80), bottom: ch };
-                draw_text(dc, "Enter فتح   ·   Ctrl+Enter المجلد   ·   Ctrl+C نسخ المسار", &mut kr, DT_LEFT | DT_VCENTER | DT_RTLREADING);
+            let hints = if a.items.get(a.sel).is_some_and(|it| it.history) {
+                "Enter للبحث   ·   Delete للحذف من السجل"
+            } else if !a.items.is_empty() {
+                "Enter فتح   ·   Ctrl+Enter المجلد   ·   Ctrl+P المعاينة   ·   اسحب الملف إلى أي برنامج"
+            } else {
+                ""
+            };
+            let mut kr = RECT { left: scale(16), top: fy, right: cw - scale(200), bottom: ch };
+            draw_text(dc, hints, &mut kr, DT_LEFT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
+        }
+
+        // The preview pane.
+        if previewing() {
+            let it = &a.items[a.sel];
+            let bottom = if has_foot { fy } else { ch };
+            fill(dc, &RECT { left: lw, top: list_top - scale(PAD) / 2 + 1, right: lw + 1, bottom }, t.line);
+            let (px, pr) = (lw + scale(16), cw - scale(16));
+            let info_h = scale(84);
+            let area = RECT { left: px, top: list_top + scale(4), right: pr, bottom: bottom - info_h - scale(8) };
+            let shown = a.preview.as_ref().filter(|p| p.path == it.path);
+            match shown {
+                Some(Preview { text: Some(lines), .. }) => {
+                    round_fill(dc, &area, t.input, scale(10));
+                    SelectObject(dc, a.fonts.mono);
+                    SetTextColor(dc, t.text);
+                    let lh = scale(16);
+                    let mut ly = area.top + scale(8);
+                    for l in lines {
+                        if ly + lh > area.bottom - scale(6) {
+                            break;
+                        }
+                        let mut lr = RECT { left: area.left + scale(10), top: ly, right: area.right - scale(8), bottom: ly + lh };
+                        draw_text(dc, l, &mut lr, DT_LEFT | DT_END_ELLIPSIS | DT_EXPANDTABS);
+                        ly += lh;
+                    }
+                }
+                Some(p) if !p.bitmap.is_null() => draw_bitmap(dc, p.bitmap, &area),
+                _ => {}
+            }
+            // What it is.
+            let mut iy = bottom - info_h;
+            SelectObject(dc, a.fonts.name);
+            SetTextColor(dc, t.text);
+            let mut nr = RECT { left: px, top: iy, right: pr, bottom: iy + scale(22) };
+            draw_text(dc, &it.name, &mut nr, DT_LEFT | DT_END_ELLIPSIS);
+            iy += scale(24);
+            SelectObject(dc, a.fonts.sub);
+            SetTextColor(dc, t.sub);
+            let kind = shown.map(|p| p.kind.as_str()).unwrap_or("");
+            let size = it.size.map(human_size).unwrap_or_default();
+            for line in [kind.to_string(), size, local_time(it.mtime)] {
+                if line.is_empty() {
+                    continue;
+                }
+                let mut lr = RECT { left: px, top: iy, right: pr, bottom: iy + scale(18) };
+                draw_text(dc, &line, &mut lr, DT_LEFT | DT_END_ELLIPSIS);
+                iy += scale(19);
             }
         }
 
@@ -696,9 +1078,33 @@ fn paint() {
     }
 }
 
+/// A 32-bit premultiplied bitmap, scaled down to fit `area`, centered.
+fn draw_bitmap(dc: HDC, b: HBITMAP, area: &RECT) {
+    unsafe {
+        let mut bm: BITMAP = std::mem::zeroed();
+        if GetObjectW(b, size_of::<BITMAP>() as i32, (&raw mut bm).cast()) == 0 || bm.bmWidth == 0 || bm.bmHeight == 0 {
+            return;
+        }
+        let (aw, ah) = (area.right - area.left, area.bottom - area.top);
+        let k = (aw as f64 / bm.bmWidth as f64).min(ah as f64 / bm.bmHeight as f64).min(1.0);
+        let (w, h) = ((bm.bmWidth as f64 * k) as i32, (bm.bmHeight as f64 * k) as i32);
+        let (x, y) = (area.left + (aw - w) / 2, area.top + (ah - h) / 2);
+        let src = CreateCompatibleDC(dc);
+        let old = SelectObject(src, b);
+        let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: 1 };
+        SetStretchBltMode(dc, HALFTONE);
+        AlphaBlend(dc, x, y, w, h, src, 0, 0, bm.bmWidth, bm.bmHeight, blend);
+        SelectObject(src, old);
+        DeleteDC(src);
+    }
+}
+
 /// The result row under a client point.
-fn row_at(y: i32) -> Option<usize> {
+fn row_at(x: i32, y: i32) -> Option<usize> {
     let a = app();
+    if previewing() && x >= scale(WIDTH) {
+        return None;
+    }
     let top = scale(HEAD) + scale(PAD) / 2;
     if y < top {
         return None;
@@ -869,6 +1275,31 @@ mod shell_menu {
         }
     }
 
+    /// The shell's data object for `path`: what a drag carries (the file
+    /// itself, as Explorer drags it).
+    pub fn data_object(path: &str, hwnd: *mut core::ffi::c_void) -> Option<windows::Win32::System::Com::IDataObject> {
+        let w: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        unsafe {
+            let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+            SHParseDisplayName(PCWSTR(w.as_ptr()), None, &mut pidl, 0, None).ok()?;
+            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+            let r = SHBindToParent::<IShellFolder>(pidl, Some(&mut child)).and_then(|f| f.GetUIObjectOf(WHWND(hwnd), &[child as *const ITEMIDLIST], None));
+            ILFree(Some(pidl));
+            r.ok()
+        }
+    }
+
+    /// Drag `path` out of our window: copy, move or link, as the target
+    /// takes it. Whether something took it.
+    pub fn drag(path: &str, hwnd: *mut core::ffi::c_void) -> bool {
+        use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource};
+        let Some(data) = data_object(path, hwnd) else { return false };
+        unsafe {
+            windows::Win32::UI::Shell::SHDoDragDrop(WHWND(hwnd), &data, None::<&IDropSource>, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)
+                .is_ok_and(|e| e.0 != 0)
+        }
+    }
+
     /// Hand a menu message to the shell's menu while it is up (owner-drawn
     /// items, submenus filled on demand). Some(result) when it took it.
     pub fn message(msg: u32, wp: usize, lp: isize) -> Option<isize> {
@@ -888,6 +1319,20 @@ mod shell_menu {
     }
 }
 
+/// Drag result `i` to another program (a mail, an editor, a folder).
+fn start_drag(i: usize) {
+    let a = app();
+    let Some(path) = a.items.get(i).filter(|it| !it.history).map(|it| it.path.clone()) else { return };
+    // The target gets focus while dropping: don't hide meanwhile.
+    a.menu_up = true;
+    let took = shell_menu::drag(&path, a.hwnd);
+    a.menu_up = false;
+    if took {
+        history::remember(&a.query);
+        hide();
+    }
+}
+
 const CMD_REVEAL: u32 = 1;
 const CMD_COPY_PATH: u32 = 2;
 
@@ -896,7 +1341,7 @@ const CMD_COPY_PATH: u32 = 2;
 /// mouse, or under the row when opened from the keyboard.
 fn context_menu(i: usize, at: Option<POINT>) {
     let a = app();
-    let Some(it) = a.items.get(i) else { return };
+    let Some(it) = a.items.get(i).filter(|it| !it.history) else { return };
     let path = it.path.clone();
     a.sel = i;
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
@@ -926,6 +1371,7 @@ fn context_menu(i: usize, at: Option<POINT>) {
                 if let Some(s) = &shell {
                     s.invoke(id, a.hwnd, pt.x, pt.y);
                 }
+                history::remember(&a.query);
                 // The file may be gone or renamed: done here.
                 hide();
             }
@@ -992,8 +1438,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_MOUSEMOVE => {
-            let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            let h = row_at(y);
+            let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+            let h = row_at(x, y);
             if h != a.hover {
                 a.hover = h;
                 unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
@@ -1001,17 +1447,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_LBUTTONDOWN => {
-            let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            if let Some(i) = row_at(y) {
-                a.sel = i;
-                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+            if let Some(i) = row_at(x, y) {
+                if a.items[i].history {
+                    apply_history(i);
+                } else {
+                    a.sel = i;
+                    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                    request_preview();
+                    // Held and moved past the drag distance: drag the file out.
+                    let mut p = POINT { x, y };
+                    unsafe { ClientToScreen(hwnd, &mut p) };
+                    if unsafe { DragDetect(hwnd, p) } != 0 {
+                        start_drag(i);
+                    }
+                }
             }
             unsafe { SetFocus(a.edit) };
             0
         }
+        WM_PREVIEW => {
+            on_preview(unsafe { Box::from_raw(lp as *mut Preview) });
+            0
+        }
         WM_RBUTTONUP => {
             let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
-            if let Some(i) = row_at(y) {
+            if let Some(i) = row_at(x, y) {
                 let mut p = POINT { x, y };
                 unsafe { ClientToScreen(hwnd, &mut p) };
                 context_menu(i, Some(p));
@@ -1023,8 +1484,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             None => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
         },
         WM_LBUTTONDBLCLK => {
-            let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
-            if let Some(i) = row_at(y) {
+            let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+            if let Some(i) = row_at(x, y).filter(|&i| !a.items[i].history) {
                 let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
                 open(i, ctrl);
             }
@@ -1159,6 +1620,8 @@ fn main() {
     let (tx, rx) = std::sync::mpsc::channel();
     let hw = hwnd as usize;
     std::thread::spawn(move || worker(rx, hw));
+    let (ptx, prx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || preview_thread(prx, hw));
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
     let app = Box::new(App {
         hwnd,
@@ -1181,6 +1644,10 @@ fn main() {
         tray_icon: small,
         taskbar_created: unsafe { RegisterWindowMessageW(w("TaskbarCreated").as_ptr()) },
         menu_up: false,
+        preview_on: load_settings(),
+        preview: None,
+        previews: ptx,
+        preview_seq: 0,
     });
     APP.store(Box::into_raw(app), Ordering::Relaxed);
     unsafe { SendMessageW(edit, WM_SETFONT, crate::app().fonts.input as usize, 1) };

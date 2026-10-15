@@ -191,6 +191,25 @@ impl Live {
         }
     }
 
+    /// Bytes in the files under folder `path`, at any depth, as the index
+    /// knows them now. A folder's subtree is one contiguous run of base
+    /// entries (blocks go out depth first), so this is a sum over a range,
+    /// plus the overlay's entries under it: no disk access.
+    pub fn tree_size(&self, path: &[u8]) -> u64 {
+        let path = normalize(path);
+        let mut total = 0u64;
+        if let Some(d) = self.base_alive(&path).and_then(|e| self.base.dir_of(e)) {
+            let (a, b) = (self.base.dir_start(d as usize), self.base.dir_end(d as usize));
+            for i in a..b {
+                if !self.is_dead(i) && self.base.kind(i as usize) & 3 == walk::KIND_FILE {
+                    total += self.base.size_of(i as usize);
+                }
+            }
+        }
+        let (lo, hi) = subtree_bounds(&path);
+        total + self.over.range(lo..hi).filter(|(_, o)| o.kind & 3 == walk::KIND_FILE).map(|(_, o)| o.size).sum::<u64>()
+    }
+
     /// Alive base entry for a path, if the base has one.
     fn base_alive(&self, path: &[u8]) -> Option<u32> {
         self.base.lookup(path).filter(|&e| !self.is_dead(e))
