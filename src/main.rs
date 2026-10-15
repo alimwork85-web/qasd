@@ -258,29 +258,32 @@ fn install(login: bool) {
     let agents = format!("for coding agents: claude mcp add -s user qasd -- \"{}\" mcp", bin.display());
     let path_note = if on_path { "added to PATH (open a new terminal)" } else { "could not add it to PATH; add it by hand" };
     println!("installed {} ({path_note})", bin.display());
+    // A sign-in task needs an administrator; without one, the search window
+    // (or the first search) starts the daemon.
+    if login && sys::elevated() {
+        // At sign-in, with the highest rights: every folder is indexed (from
+        // the MFT), and no UAC prompt shows each time.
+        let tr = format!("\"{}\" serve", bin.display());
+        let args = ["/Create", "/F", "/TN", TASK, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", &tr];
+        if !run_quiet("schtasks", &args) {
+            die("schtasks /Create failed");
+        }
+        run_quiet("schtasks", &["/Run", "/TN", TASK]);
+        println!("the daemon starts at sign-in as administrator");
+    } else {
+        let note = if login { " (a sign-in task needs an administrator terminal; the search window starts the daemon instead)" } else { "" };
+        println!("the daemon starts on first use{note}");
+    }
     if has_window {
-        // The search window starts with Windows; Alt+Q opens it.
+        // The search window starts with Windows; Alt+Q opens it. Started
+        // last, so it finds the elevated daemon instead of starting its own.
         let val = format!("\"{}\"", win.display());
         run_quiet("reg", &["add", RUN_KEY, "/v", "Qasd", "/t", "REG_SZ", "/d", &val, "/f"]);
+        std::thread::sleep(std::time::Duration::from_millis(500));
         start_window(&win);
         println!("search window: press Alt+Q (starts with Windows; tray icon to quit)");
     }
-    // A sign-in task needs an administrator; without one, the search window
-    // (or the first search) starts the daemon.
-    if !login || !sys::elevated() {
-        let note = if login { " (a sign-in task needs an administrator terminal; the search window starts the daemon instead)" } else { "" };
-        println!("the daemon starts on first use{note}\n{agents}");
-        return;
-    }
-    // At sign-in, with the highest rights: every folder is indexed, and no
-    // UAC prompt shows each time.
-    let tr = format!("\"{}\" serve", bin.display());
-    let args = ["/Create", "/F", "/TN", TASK, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", &tr];
-    if !run_quiet("schtasks", &args) {
-        die("schtasks /Create failed");
-    }
-    run_quiet("schtasks", &["/Run", "/TN", TASK]);
-    println!("the daemon starts at sign-in as administrator\n{agents}");
+    println!("{agents}");
 }
 
 fn uninstall() {
