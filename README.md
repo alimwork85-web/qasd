@@ -1,0 +1,143 @@
+# Qasd (قَصْد)
+
+Whole-disk file search for Windows: fuzzy names that forgive typos, and indexed
+search inside files. A CLI with a small background daemon, a Rust crate, or an
+MCP server for coding agents.
+
+Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch)
+(macOS, MIT). The search engine (name index, fuzzy matching, trigram content
+index, query language, git filters, MCP) is fsearch's. The macOS layers were
+rewritten for Windows.
+
+```
+cargo build --release
+.\target\release\qasd.exe install          # -> %LOCALAPPDATA%\Qasd\bin\qasd.exe, added to PATH
+qasd qasd main                             # find files by name
+qasd "ext:rs grep:apply_dir"               # search inside files
+```
+
+## Speed
+
+Measured on this machine: Windows 11, two fixed drives (C: and D:), not
+running as administrator.
+
+| | |
+|---|---:|
+| first full index (2,019,693 entries) | 34 s |
+| restart, catching up on changes since the last run | 3.4 s |
+| find a file by name, in the daemon | ~0.8 ms |
+| grep, first page, in the daemon | ~0.3 ms |
+| a CLI search, end to end (mostly Windows process start) | ~28 ms |
+| a new, renamed, edited or deleted file shows up | under one CLI round trip (~30 ms) |
+| name index on disk | 59 MB |
+| daemon memory | ~50 MB |
+
+## Queries
+
+```
+qasd "readme in:~\Documents"              # inside a folder (C:\..., ~\..., relative)
+qasd "type:image size:>5mb mtime:<7d"
+qasd "ext:rs regex:fn\s+\w+_dir"          # regex inside files
+qasd "sym:apply_dir"                      # where it's defined
+qasd "src/**/*.{c,h} !test/ init"         # globs, in or out
+qasd "git:modified in:~\Projects\app"
+```
+
+Words are fuzzy and forgive a typo at any letter, two in words of 8+
+(`mian.rs` finds `main.rs`). Also `'exact`, `^prefix`, `suffix$` and
+`!exclude`. Filters: `ext:` `type:` `kind:` `in:` `size:` `mtime:` `re:`
+`path:` `grep:` `regex:` `sym:` `limit:` and `git:` (`modified` `staged`
+`untracked` `clean` `tracked` `ignored` `conflict`). A pattern with spaces goes
+in quotes: `grep:"fn main"`.
+
+## What grep covers
+
+Text files in your user folder up to 1 MB, and up to 10 MB inside git repos,
+minus what git ignores. It leaves out `AppData`, lockfiles, large JSON,
+minified assets and build output. Add more folders to skip to
+`%LOCALAPPDATA%\Qasd\content-skip.txt`, one per line. File names are indexed
+on every fixed drive. `in:` a folder outside your user folder is searched by
+reading its files directly. OneDrive files that are only in the cloud are
+never downloaded by a search.
+
+## Administrator rights
+
+As a normal user, Qasd indexes every folder you can open and leaves out the
+few that only administrators can read. To index those too, run the daemon
+elevated: `qasd install --login` from an administrator terminal creates a
+sign-in task with the highest rights, so no UAC prompt appears each time.
+
+Environment variables:
+
+- `QASD_DRIVES=C,D` limits indexing to these drives (default: every fixed drive).
+- `QASD_SKIP=D:\VMs;E:\backup` leaves out these folders.
+
+## API
+
+JSON lines over the named pipe `\\.\pipe\qasd-<hash>`, which only the current
+user can open, or through `qasd stdio`. Paths on the wire use the index's
+form, `/C:/Users/me/x.txt`. Requests accept either form.
+
+```json
+{"q": "qasd main", "limit": 20, "offset": 20}
+{"op": "grep", "pattern": "apply_dir", "in": "C:\\Users\\me\\Projects", "context": 2}
+{"q": "main.rs", "boost": true, "near": "C:\\Users\\me\\app\\src\\lib.rs", "git": true}
+{"op": "open", "path": "C:\\Users\\me\\app\\src\\main.rs"}
+{"op": "recent", "in": "~\\Projects\\app"}
+```
+
+For coding agents, `qasd mcp` is an MCP server on stdio with `find_files`,
+`grep` and `multi_grep`:
+
+```
+claude mcp add -s user qasd -- "%LOCALAPPDATA%\Qasd\bin\qasd.exe" mcp
+```
+
+Other commands: `qasd status`, `qasd stop`, `qasd serve` (daemon in the
+foreground), `qasd uninstall`, `qasd bench <query>`.
+
+## How it works on Windows
+
+| fsearch on macOS | Qasd on Windows |
+|---|---|
+| `getattrlistbulk` crawl | `FindFirstFileExW` (`FindExInfoBasic`, `LARGE_FETCH`), folders in parallel on rayon |
+| FSEvents | `ReadDirectoryChangesW` on each drive root, whole subtree |
+| FSEvents replay after a restart | relists only the folders whose mtime moved since the last sync |
+| unix socket | named pipe, overlapped I/O, ACL limited to the user and SYSTEM |
+| malloc space-efficient mode | mimalloc, with `mi_collect` when idle |
+| launchd LaunchAgent | Task Scheduler sign-in task |
+| `~/Library/Application Support/FSearch` | `%LOCALAPPDATA%\Qasd` |
+| `/Users/me/x` | `/C:/Users/me/x` inside (one tree, drives under `/`), `C:\Users\me\x` on screen |
+
+Symbolic links, junctions and mount points are listed as links and never
+followed. Paths are kept as WTF-8, so any NTFS name round-trips.
+
+---
+
+## بالعربية
+
+**قصد** أداة بحث فائقة السرعة في كل أقراص ويندوز، وهي نسخة لويندوز من أداة
+fsearch التي تعمل على الماك فقط. تبحث في أسماء الملفات بتسامح مع الأخطاء
+الإملائية، وفي محتوى الملفات النصية عبر فهرس، ويبقى الفهرس محدّثاً لحظياً.
+
+**التثبيت:**
+
+```
+cargo build --release
+.\target\release\qasd.exe install
+```
+
+بعدها افتح طرفية جديدة واكتب `qasd` متبوعاً بما تبحث عنه:
+
+```
+qasd تقرير                         # بالاسم
+qasd "ext:md grep:الميزانية"        # داخل الملفات
+qasd "in:~\Desktop pdf"            # داخل مجلد
+```
+
+لتعمل الخدمة تلقائياً عند تسجيل الدخول: `qasd install --login`. وإذا شغّلته من
+طرفية بصلاحيات المدير فستُفهرَس أيضاً المجلدات التي لا يقرؤها إلا المدير.
+
+## License
+
+MIT. See [LICENSE](LICENSE): the original fsearch copyright and the port's.
