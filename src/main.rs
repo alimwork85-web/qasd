@@ -64,7 +64,7 @@ fn main() {
         },
         Some("bench") => bench(&args[1..].join(" ")),
         Some("install") => install(args.iter().any(|a| a == "--login")),
-        Some("uninstall") => uninstall(),
+        Some("uninstall") => uninstall(args.iter().any(|a| a == "--purge")),
         Some(_) => {
             let json = args.iter().any(|a| a == "--json");
             let q: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
@@ -213,6 +213,77 @@ fn add_to_path(dir: &str) -> bool {
 }
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+/// The Installed apps entry (Settings > Apps, Programs and Features).
+const APP_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Qasd";
+const PUBLISHER: &str = "Ali Alhumedi";
+
+/// Take `dir` off the user's PATH.
+fn remove_from_path(dir: &str) -> bool {
+    let script = format!(
+        "$d='{dir}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
+         if ($p) {{ [Environment]::SetEnvironmentVariable('Path', (($p -split ';') | Where-Object {{ $_ -and $_ -ne $d }}) -join ';', 'User') }}"
+    );
+    run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])
+}
+
+/// List Qasd in Installed apps, published by Ali Alhumedi, with a full
+/// uninstall (`qasd uninstall --purge`).
+fn register_app(bin: &std::path::Path, win: &std::path::Path) {
+    let size_kb = [bin, win].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum::<u64>() / 1024;
+    let uninstall = format!("\"{}\" uninstall --purge", bin.display());
+    let icon = format!("{},0", if win.exists() { win } else { bin }.display());
+    let today = {
+        let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+        // Days since 1970 to a civil date (Western digits, yyyymmdd).
+        let z = s / 86400 + 719_468;
+        let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+        format!("{:04}{m:02}{d:02}", yoe + era * 400 + (m <= 2) as i64)
+    };
+    let location = bin_dir().display().to_string();
+    let size = size_kb.to_string();
+    let values: [(&str, &str, &str); 11] = [
+        ("DisplayName", "REG_SZ", "Qasd (قصد)"),
+        ("DisplayVersion", "REG_SZ", env!("CARGO_PKG_VERSION")),
+        ("Publisher", "REG_SZ", PUBLISHER),
+        ("DisplayIcon", "REG_SZ", &icon),
+        ("InstallLocation", "REG_SZ", &location),
+        ("InstallDate", "REG_SZ", &today),
+        ("UninstallString", "REG_SZ", &uninstall),
+        ("URLInfoAbout", "REG_SZ", "https://github.com/alimwork85-web/qasd"),
+        ("EstimatedSize", "REG_DWORD", &size),
+        ("NoModify", "REG_DWORD", "1"),
+        ("NoRepair", "REG_DWORD", "1"),
+    ];
+    for (name, kind, data) in values {
+        run_quiet("reg", &["add", APP_KEY, "/v", name, "/t", kind, "/d", data, "/f"]);
+    }
+}
+
+/// Run this same command again as administrator (a UAC prompt), and wait.
+fn rerun_elevated(args: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (exe, verb, params) = (w(&std::env::current_exe().unwrap().display().to_string()), w("runas"), w(args));
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = exe.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = 0;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        return false;
+    }
+    unsafe {
+        windows_sys::Win32::System::Threading::WaitForSingleObject(info.hProcess, u32::MAX);
+        windows_sys::Win32::Foundation::CloseHandle(info.hProcess);
+    }
+    true
+}
 
 /// Copy `from` over `to` (through a temp name, so a reinstall from the
 /// installed copy works too).
@@ -283,17 +354,39 @@ fn install(login: bool) {
         start_window(&win);
         println!("search window: press Alt+Q (starts with Windows; tray icon to quit)");
     }
-    println!("{agents}");
+    register_app(&bin, &win);
+    println!("listed in Installed apps (publisher: {PUBLISHER})\n{agents}");
 }
 
-fn uninstall() {
+/// Undo `install`. `purge` (from Installed apps): everything, the program
+/// and its index too.
+fn uninstall(purge: bool) {
+    // The sign-in task and the daemon it started belong to the administrator
+    // side: ask for it (UAC) to remove them.
+    if task_exists() && !sys::elevated() && rerun_elevated(if purge { "uninstall --purge" } else { "uninstall" }) {
+        return;
+    }
     run_quiet("schtasks", &["/End", "/TN", TASK]);
     let removed = run_quiet("schtasks", &["/Delete", "/F", "/TN", TASK]);
     run_quiet("reg", &["delete", RUN_KEY, "/v", "Qasd", "/f"]);
     run_quiet("taskkill", &["/F", "/IM", "qasdw.exe"]);
     let _ = server::stop(&data_dir());
-    let what = if removed { format!("the sign-in task \"{TASK}\" and ") } else { String::new() };
-    println!("removed {what}the search window's start with Windows; index kept in {}", data_dir().display());
+    if !purge {
+        let what = if removed { format!("the sign-in task \"{TASK}\" and ") } else { String::new() };
+        println!("removed {what}the search window's start with Windows; index kept in {}", data_dir().display());
+        return;
+    }
+    run_quiet("reg", &["delete", APP_KEY, "/f"]);
+    remove_from_path(&bin_dir().display().to_string());
+    // This program is one of the files to delete: a detached cmd does it
+    // once we have exited.
+    use std::os::windows::process::CommandExt;
+    let dir = data_dir().display().to_string();
+    let _ = std::process::Command::new("cmd")
+        .raw_arg(format!("/c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{dir}\""))
+        .creation_flags(0x0800_0000 | 0x0000_0008) // CREATE_NO_WINDOW | DETACHED_PROCESS
+        .spawn();
+    println!("Qasd removed: the program, its index and settings ({dir})");
 }
 
 fn die(msg: &str) -> ! {

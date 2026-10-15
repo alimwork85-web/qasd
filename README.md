@@ -1,5 +1,7 @@
 # Qasd (قَصْد)
 
+**Developer: Ali Alhumedi** · [Download](https://github.com/alimwork85-web/qasd/releases/latest) · [Changelog / سجل التغييرات](CHANGELOG.md)
+
 Whole-disk file search for Windows: fuzzy names that forgive typos, and indexed
 search inside files. A search window on Alt+Q, a CLI with a small background
 daemon, a Rust crate, or an MCP server for coding agents.
@@ -186,4 +188,7 @@ qasd "in:~\Desktop pdf"            # داخل مجلد
 
 ## License
 
-MIT. See [LICENSE](LICENSE): the original fsearch copyright and the port's.
+MIT. Qasd © 2026 **Ali Alhumedi**. Built on fsearch © 2026 Noah Dunnagan.
+See [LICENSE](LICENSE).
+
+المطوّر: **Ali Alhumedi**.

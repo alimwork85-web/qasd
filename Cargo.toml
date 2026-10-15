@@ -1,9 +1,11 @@
 [package]
 name = "qasd"
-version = "0.4.0"
+version = "0.7.0"
+authors = ["Ali Alhumedi"]
 edition = "2024"
 license = "MIT"
-description = "Whole-disk file search for Windows: fuzzy names, typo tolerance, indexed content grep (a Windows port of fsearch)"
+description = "Qasd: whole-disk file search for Windows by Ali Alhumedi - fuzzy names, typo tolerance, indexed content grep, disk usage (a Windows port of fsearch)"
+repository = "https://github.com/alimwork85-web/qasd"
 
 [dependencies]
 rayon = "1.12"
