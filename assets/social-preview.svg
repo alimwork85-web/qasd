@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1b2e"/>
+      <stop offset="1" stop-color="#14325a"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa6ff"/>
+      <stop offset="1" stop-color="#2a78d6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <g opacity="0.07" stroke="#ffffff" stroke-width="1">
+    <path d="M0 80H1280M0 160H1280M0 240H1280M0 320H1280M0 400H1280M0 480H1280M0 560H1280M160 0V640M320 0V640M480 0V640M640 0V640M800 0V640M960 0V640M1120 0V640"/>
+  </g>
+  <!-- magnifier -->
+  <g transform="translate(120 130) scale(1.25)">
+    <circle cx="80" cy="80" r="62" fill="none" stroke="url(#lens)" stroke-width="22"/>
+    <circle cx="80" cy="80" r="44" fill="#5aa6ff" opacity="0.15"/>
+    <path d="M126 126 L182 182" stroke="url(#lens)" stroke-width="30" stroke-linecap="round"/>
+  </g>
+  <g font-family="Segoe UI, Tahoma, Arial, sans-serif" fill="#ffffff">
+    <text x="440" y="215" font-size="110" font-weight="700">Qasd <tspan fill="#5aa6ff">قصد</tspan></text>
+    <text x="444" y="275" font-size="32" fill="#c9d8ee">Whole-disk file search for Windows, in Rust</text>
+    <text x="444" y="325" font-size="30" fill="#c9d8ee">بحث فائق السرعة في كل ملفات ويندوز</text>
+    <g font-size="24" font-weight="600">
+      <rect x="120" y="420" width="230" height="56" rx="28" fill="#2a78d6"/>
+      <text x="235" y="456" text-anchor="middle">Alt+Q window</text>
+      <rect x="370" y="420" width="250" height="56" rx="28" fill="#2a78d6"/>
+      <text x="495" y="456" text-anchor="middle">0.8 ms per search</text>
+      <rect x="640" y="420" width="270" height="56" rx="28" fill="#2a78d6"/>
+      <text x="775" y="456" text-anchor="middle">2M files in 5.3 s</text>
+      <rect x="930" y="420" width="230" height="56" rx="28" fill="#2a78d6"/>
+      <text x="1045" y="456" text-anchor="middle">grep inside</text>
+    </g>
+    <text x="640" y="545" font-size="24" fill="#8fa6c6" text-anchor="middle">by Ali Alhumedi  ·  MIT  ·  github.com/alimwork85-web/qasd</text>
+  </g>
+</svg>
