@@ -222,6 +222,29 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
             let scores: Vec<f32> = paths.iter().map(|p| cx.frecency.open(&real(p), now)).collect();
             Ok(Reply::Value(json!({"ok": true, "scores": scores})))
         }
+        "usage" => {
+            // What takes the space in a folder ("/": the drives): children
+            // largest first, sizes summed from the index.
+            let p = v.get("path").and_then(Value::as_str).unwrap_or("/");
+            let path = if p == "/" { b"/".to_vec() } else { real(p) };
+            let t = Instant::now();
+            let items = engine.usage(&path).ok_or_else(|| format!("not in the index: {p}"))?;
+            let total: u64 = items.iter().map(|i| i.2).sum();
+            let limit = v.get("limit").and_then(Value::as_u64).unwrap_or(1000) as usize;
+            let list: Vec<Value> = items
+                .iter()
+                .take(limit)
+                .map(|(n, k, s, m)| json!({"name": String::from_utf8_lossy(n), "kind": kind_name(*k), "size": s, "mtime": m}))
+                .collect();
+            Ok(Reply::Value(json!({
+                "ok": true,
+                "path": String::from_utf8_lossy(&path),
+                "total": total,
+                "count": items.len(),
+                "items": list,
+                "took_us": t.elapsed().as_micros() as u64,
+            })))
+        }
         "recent" => {
             // What you worked on lately (under `in:`, passing the query),
             // best first: opens and your commits (see `frecent`).

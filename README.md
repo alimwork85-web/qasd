@@ -35,6 +35,7 @@ results as you type, each with its file icon and folder.
 | drag a result | drop the file into any program: a mail, an editor, a chat, a folder |
 | Ctrl+P | show or hide the preview pane |
 | empty box | your recent searches: Enter runs one again, Delete removes it |
+| Ctrl+U, the pie button, or right-click a folder | what takes the space: a folder's contents largest first, each with its size, share and a bar (every drive when no folder is selected); Enter goes into a folder, Backspace up, Esc back to searching |
 
 Each result shows its size and date; a folder's size is everything in it,
 summed from the index (no disk access). The preview pane shows the selected
@@ -167,6 +168,8 @@ Enter يفتح الملف، وCtrl+Enter يفتح مجلده، وCtrl+C ينسخ
 اسحب أي نتيجة وأفلتها في برنامج آخر. وتعرض كل نتيجة حجمها وتاريخها، وحجم المجلد يشمل كل ما فيه.
 لوحة المعاينة تعرض الصورة أو أول أسطر الملف النصي، ويُظهرها Ctrl+P أو يخفيها.
 وعندما يكون مربع البحث فارغاً تظهر عمليات البحث السابقة.
+ولمعرفة ما الذي يشغل مساحة القرص: Ctrl+U أو زر الدائرة في مربع البحث. يعرض محتويات المجلد من الأكبر إلى الأصغر، مع حجم كل عنصر ونسبته وشريط يوضحها. Enter يدخل المجلد، وBackspace يصعد مستوى، وEsc يعود إلى البحث.
+وكل هذا يُحسب من الفهرس في أجزاء من الثانية، دون قراءة القرص.
 تُفهرس الأقراص الخارجية (USB) تلقائياً عند توصيلها، وتُزال من النتائج عند فصلها.
 تعمل النافذة مع تشغيل ويندوز، وأيقونتها في شريط المهام بجانب الساعة.
 

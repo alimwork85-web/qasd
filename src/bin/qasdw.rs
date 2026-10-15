@@ -76,6 +76,8 @@ struct Item {
     mtime: u32,
     /// A past search (shown while the box is empty): `name` is the query.
     history: bool,
+    /// Disk usage view: this row's part of its folder (0..1).
+    share: f32,
 }
 
 struct Answer {
@@ -83,12 +85,16 @@ struct Answer {
     items: Vec<Item>,
     error: Option<String>,
     took: Duration,
+    /// A disk usage answer: the folder (index form, `/C:/x`) and its total.
+    usage: Option<(String, u64)>,
 }
 
 enum Job {
     /// Start the daemon (and load its index) before the first keystroke.
     Warm,
     Search(u64, String),
+    /// What takes the space in a folder (index form; "/": the drives).
+    Usage(u64, String),
     Opened(String),
 }
 
@@ -212,10 +218,18 @@ struct App {
     preview_seq: u64,
     /// The button under the mouse: the preview toggle or its close.
     hover_btn: Option<Btn>,
+    /// The disk usage view is up: the folder shown (index form) and its total.
+    usage: Option<(String, u64)>,
+    /// Going up: the folder we came from, to select it again.
+    usage_select: Option<String>,
+    /// Setting the search box's text ourselves: not a search.
+    quiet: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Btn {
+    /// In the search box: what takes the space (disk usage).
+    Usage,
     /// In the search box: show or hide the preview.
     Toggle,
     /// On the preview pane: close it.
@@ -228,6 +242,13 @@ fn toggle_rect() -> RECT {
     unsafe { GetClientRect(app().hwnd, &mut rc) };
     let (r, top, bottom) = (rc.right - scale(16), scale(14), scale(HEAD) - scale(14));
     RECT { left: r - (bottom - top), top, right: r, bottom }
+}
+
+/// The disk usage button, left of the preview button.
+fn usage_rect() -> RECT {
+    let t = toggle_rect();
+    let w = t.right - t.left;
+    RECT { left: t.left - w - scale(6), top: t.top, right: t.left - scale(6), bottom: t.bottom }
 }
 
 /// The close button, at the top corner of the preview pane.
@@ -244,6 +265,8 @@ fn inside(r: &RECT, x: i32, y: i32) -> bool {
 fn btn_at(x: i32, y: i32) -> Option<Btn> {
     if inside(&toggle_rect(), x, y) {
         Some(Btn::Toggle)
+    } else if inside(&usage_rect(), x, y) {
+        Some(Btn::Usage)
     } else if previewing() && inside(&close_rect(), x, y) {
         Some(Btn::Close)
     } else {
@@ -314,12 +337,39 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
             Job::Opened(p) => {
                 let _ = ask(&json!({"op": "open", "path": p}));
             }
+            Job::Usage(seq, path) => {
+                let t = Instant::now();
+                let mut a = Answer { seq, items: Vec::new(), error: None, took: Duration::ZERO, usage: None };
+                match ask(&json!({"op": "usage", "path": path, "limit": 2000})) {
+                    Ok(v) if v["ok"] == true => {
+                        let dir = v["path"].as_str().unwrap_or("/").to_string();
+                        let total = v["total"].as_u64().unwrap_or(0);
+                        for i in v["items"].as_array().into_iter().flatten() {
+                            let name = i["name"].as_str().unwrap_or("");
+                            let child = if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") };
+                            let mut it = item(&child, i["kind"] == "dir", None);
+                            it.size = i["size"].as_u64();
+                            it.mtime = i["mtime"].as_u64().unwrap_or(0) as u32;
+                            it.share = if total > 0 { it.size.unwrap_or(0) as f32 / total as f32 } else { 0.0 };
+                            a.items.push(it);
+                        }
+                        a.usage = Some((dir, total));
+                    }
+                    Ok(v) => a.error = Some(v["error"].as_str().unwrap_or("error").to_string()),
+                    Err(e) => a.error = Some(e),
+                }
+                a.took = t.elapsed();
+                let p = Box::into_raw(Box::new(a));
+                if unsafe { PostMessageW(hwnd as HWND, WM_RESULTS, 0, p as isize) } == 0 {
+                    drop(unsafe { Box::from_raw(p) });
+                }
+            }
             Job::Search(seq, q) => {
                 if seq < LATEST.load(Ordering::Relaxed) {
                     continue;
                 }
                 let t = Instant::now();
-                let mut a = Answer { seq, items: Vec::new(), error: None, took: Duration::ZERO };
+                let mut a = Answer { seq, items: Vec::new(), error: None, took: Duration::ZERO, usage: None };
                 if !q.trim().is_empty() {
                     match ask(&json!({"q": q, "limit": LIMIT, "boost": true, "cwd": sys::home()})) {
                         Ok(v) if v["ok"] == true => a.items = items(&v),
@@ -342,7 +392,7 @@ fn item(path: &str, is_dir: bool, line: Option<(u64, String)>) -> Item {
     let cut = path.rfind('\\').map_or(0, |i| i + 1);
     let (dir, name) = (path[..cut.saturating_sub(1).max(if cut == 3 { 3 } else { 0 })].to_string(), path[cut..].to_string());
     let dir = if dir.is_empty() { path[..cut].to_string() } else { dir };
-    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, line, size: None, mtime: 0, history: false }
+    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, line, size: None, mtime: 0, history: false, share: 0.0 }
 }
 
 fn items(v: &Value) -> Vec<Item> {
@@ -539,7 +589,7 @@ fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
 fn history_items() -> Vec<Item> {
     history::load()
         .into_iter()
-        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, line: None, size: None, mtime: 0, history: true })
+        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, line: None, size: None, mtime: 0, history: true, share: 0.0 })
         .collect()
 }
 
@@ -596,7 +646,7 @@ fn layout() {
     unsafe { SetWindowPos(a.hwnd, std::ptr::null_mut(), x, r.top, wd, h, SWP_NOZORDER | SWP_NOACTIVATE) };
     let eh = scale(30);
     // (Room at the right for the preview button.)
-    unsafe { MoveWindow(a.edit, scale(52), (scale(HEAD) - eh) / 2, wd - scale(52) - scale(64), eh, 1) };
+    unsafe { MoveWindow(a.edit, scale(52), (scale(HEAD) - eh) / 2, wd - scale(52) - scale(110), eh, 1) };
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
 }
 
@@ -718,13 +768,31 @@ fn search() {
     let _ = a.jobs.send(Job::Search(a.seq, a.query.clone()));
 }
 
-fn on_results(ans: Box<Answer>) {
+fn on_results(mut ans: Box<Answer>) {
     let a = app();
     if ans.seq < a.shown_seq || ans.seq != a.seq {
         return;
     }
     a.shown_seq = ans.seq;
     unsafe { KillTimer(a.hwnd, TIMER_RETRY) };
+    a.usage = ans.usage.take();
+    if let Some((dir, total)) = a.usage.clone()
+        && ans.error.is_none()
+    {
+        // The disk usage view: largest first, the folder said below.
+        a.items = std::mem::take(&mut ans.items);
+        let place = if dir == "/" { "كل الأقراص".to_string() } else { sys::display(dir.as_bytes()) };
+        // (Latin parts isolated left-to-right, so the line reads in order.)
+        a.status = format!("{}  ·  {}  ·  {}", items_ar(a.items.len()), ltr(&human_size(total)), ltr(&place));
+        let back = a.usage_select.take();
+        a.sel = back.and_then(|n| a.items.iter().position(|it| it.name.trim_end_matches('\\') == n)).unwrap_or(0);
+        a.top = 0;
+        ensure_visible();
+        a.hover = None;
+        layout();
+        request_preview();
+        return;
+    }
     match ans.error {
         Some(e) => {
             // The very first index is still being built: try again shortly.
@@ -742,7 +810,7 @@ fn on_results(ans: Box<Answer>) {
         }
         None => {
             a.items = ans.items;
-            a.status = format!("{}  ·  {:.1} ms", results_ar(a.items.len()), ans.took.as_secs_f64() * 1000.0);
+            a.status = format!("{}  ·  {}", results_ar(a.items.len()), ltr(&format!("{:.1} ms", ans.took.as_secs_f64() * 1000.0)));
         }
     }
     a.sel = 0;
@@ -750,6 +818,70 @@ fn on_results(ans: Box<Answer>) {
     a.hover = None;
     layout();
     request_preview();
+}
+
+/// `s` as a left-to-right run in right-to-left text (LRE ... PDF: GDI
+/// draws the newer isolates LRI/PDI as boxes).
+fn ltr(s: &str) -> String {
+    format!("\u{202A}{s}\u{202C}")
+}
+
+/// "3 عناصر": Arabic counted nouns, Western digits.
+fn items_ar(n: usize) -> String {
+    match n {
+        0 => "فارغ".into(),
+        1 => "عنصر واحد".into(),
+        2 => "عنصران".into(),
+        3..=10 => format!("{n} عناصر"),
+        _ => format!("{n} عنصراً"),
+    }
+}
+
+/// Show what takes the space in `dir` (index form; "/": the drives).
+fn open_usage(dir: String) {
+    let a = app();
+    // An empty box, so Backspace goes up a level (without searching).
+    a.quiet = true;
+    unsafe { SetWindowTextW(a.edit, w("").as_ptr()) };
+    a.quiet = false;
+    a.query.clear();
+    a.seq += 1;
+    LATEST.store(a.seq, Ordering::Relaxed);
+    let _ = a.jobs.send(Job::Usage(a.seq, dir));
+}
+
+/// Disk usage of the selected folder, or of every drive.
+fn usage_of_selection() {
+    let a = app();
+    let dir = match a.items.get(a.sel) {
+        Some(it) if it.is_dir && !it.history => String::from_utf8_lossy(&sys::from_user(&it.path)).into_owned(),
+        _ => "/".to_string(),
+    };
+    open_usage(dir);
+}
+
+/// One level up in the disk usage view, selecting where we came from.
+fn usage_up() {
+    let a = app();
+    let Some((dir, _)) = a.usage.clone() else { return };
+    if dir == "/" {
+        return;
+    }
+    let (parent, name) = match dir.rfind('/') {
+        Some(0) if dir.len() <= 3 => ("/".to_string(), dir[1..].to_string()),
+        Some(0) => ("/".to_string(), dir[1..].to_string()),
+        Some(i) => (dir[..i].to_string(), dir[i + 1..].to_string()),
+        None => ("/".to_string(), dir.clone()),
+    };
+    a.usage_select = Some(name);
+    open_usage(parent);
+}
+
+/// Back to searching, with what was typed before.
+fn exit_usage() {
+    let a = app();
+    a.usage = None;
+    search();
 }
 
 /// Put a past search back in the box (it runs as typed).
@@ -790,6 +922,10 @@ fn open(i: usize, reveal: bool) {
     let Some(it) = a.items.get(i) else { return };
     if it.history {
         apply_history(i);
+        return;
+    }
+    if a.usage.is_some() && it.is_dir && !reveal {
+        open_usage(String::from_utf8_lossy(&sys::from_user(&it.path)).into_owned());
         return;
     }
     let p = w(&it.path);
@@ -859,7 +995,17 @@ fn key(vk: u32) -> bool {
     let a = app();
     let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
     match vk as u16 {
+        VK_ESCAPE if a.usage.is_some() => exit_usage(),
         VK_ESCAPE => hide(),
+        VK_BACK if a.usage.is_some() && a.query.is_empty() && !ctrl => usage_up(),
+        VK_LEFT if a.usage.is_some() && unsafe { GetKeyState(VK_MENU as i32) } < 0 => usage_up(),
+        k if ctrl && k == b'U' as u16 => {
+            if a.usage.is_some() {
+                exit_usage()
+            } else {
+                usage_of_selection()
+            }
+        }
         VK_RETURN => open(a.sel, ctrl),
         VK_DOWN => move_sel(1),
         VK_UP => move_sel(-1),
@@ -984,6 +1130,16 @@ fn paint() {
         let mut tg = tr;
         SetTextColor(dc, if a.preview_on { t.accent } else { t.sub });
         draw_text(dc, "\u{E8A1}", &mut tg, DT_CENTER | DT_VCENTER);
+        // The disk usage button: lit while that view is up.
+        let ur = usage_rect();
+        if a.usage.is_some() {
+            round_fill(dc, &ur, t.sel, scale(8));
+        } else if a.hover_btn == Some(Btn::Usage) {
+            round_fill(dc, &ur, t.line, scale(8));
+        }
+        let mut ug = ur;
+        SetTextColor(dc, if a.usage.is_some() { t.accent } else { t.sub });
+        draw_text(dc, "\u{EB05}", &mut ug, DT_CENTER | DT_VCENTER);
 
         // Results.
         let mut y = head;
@@ -1052,6 +1208,20 @@ fn paint() {
             let mut r2 = RECT { left, top: y + scale(27), right, bottom: y + scale(45) };
             match &it.line {
                 Some((n, text)) => draw_text(dc, &format!("{n}:  {text}"), &mut r2, DT_LEFT | DT_END_ELLIPSIS),
+                // The disk usage view: its part of the folder, as a bar.
+                None if a.usage.is_some() => {
+                    let pct = format!("{:.1}%", it.share * 100.0);
+                    let span = (right - left - scale(64)).max(scale(20));
+                    let track = RECT { left, top: y + scale(32), right: left + span, bottom: y + scale(40) };
+                    round_fill(dc, &track, t.line, scale(4));
+                    let fillw = ((span as f32) * it.share.clamp(0.0, 1.0)) as i32;
+                    if fillw > 0 {
+                        let bar = RECT { left, top: track.top, right: left + fillw.max(scale(4)), bottom: track.bottom };
+                        round_fill(dc, &bar, t.accent, scale(4));
+                    }
+                    let mut pr2 = RECT { left: left + span + scale(8), top: y + scale(27), right, bottom: y + scale(45) };
+                    draw_text(dc, &pct, &mut pr2, DT_LEFT);
+                }
                 None => draw_text(dc, &it.dir, &mut r2, DT_LEFT | DT_PATH_ELLIPSIS),
             }
             y += scale(ROW);
@@ -1066,7 +1236,9 @@ fn paint() {
             SetTextColor(dc, t.sub);
             let mut fr = RECT { left: scale(16), top: fy, right: cw - scale(16), bottom: ch };
             draw_text(dc, &a.status, &mut fr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
-            let hints = if a.items.get(a.sel).is_some_and(|it| it.history) {
+            let hints = if a.usage.is_some() {
+                "Enter فتح المجلد   ·   Backspace للأعلى   ·   Esc رجوع للبحث"
+            } else if a.items.get(a.sel).is_some_and(|it| it.history) {
                 "Enter للبحث   ·   Delete للحذف من السجل"
             } else if !a.items.is_empty() {
                 "Enter فتح   ·   Ctrl+Enter المجلد   ·   Ctrl+P المعاينة   ·   اسحب الملف إلى أي برنامج"
@@ -1401,6 +1573,7 @@ fn start_drag(i: usize) {
 
 const CMD_REVEAL: u32 = 1;
 const CMD_COPY_PATH: u32 = 2;
+const CMD_USAGE: u32 = 3;
 
 /// The right-click menu for result `i`: ours on top (open its location,
 /// copy its path), then the shell's own, as in Explorer. At the
@@ -1423,16 +1596,25 @@ fn context_menu(i: usize, at: Option<POINT>) {
         let copy = w("نسخ المسار");
         AppendMenuW(m, MF_STRING, CMD_REVEAL as usize, reveal.as_ptr());
         AppendMenuW(m, MF_STRING, CMD_COPY_PATH as usize, copy.as_ptr());
+        let usage = w("ما الذي يشغل المساحة؟\tCtrl+U");
+        let is_dir = a.items.get(i).is_some_and(|it| it.is_dir);
+        if is_dir {
+            AppendMenuW(m, MF_STRING, CMD_USAGE as usize, usage.as_ptr());
+        }
         AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
         // Shift+right-click: the extended items too, as in Explorer.
         let extended = GetKeyState(VK_SHIFT as i32) < 0;
-        let shell = shell_menu::fill(&path, a.hwnd, m, 3, extended);
+        let shell = shell_menu::fill(&path, a.hwnd, m, if is_dir { 4 } else { 3 }, extended);
         a.menu_up = true;
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LAYOUTRTL, pt.x, pt.y, 0, a.hwnd, std::ptr::null()) as u32;
         match cmd {
             0 => {}
             CMD_REVEAL => open(i, true),
             CMD_COPY_PATH => copy_path(i),
+            CMD_USAGE => {
+                a.sel = i;
+                usage_of_selection();
+            }
             id if id >= shell_menu::FIRST => {
                 if let Some(s) = &shell {
                     s.invoke(id, a.hwnd, pt.x, pt.y);
@@ -1480,7 +1662,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_COMMAND => {
             // EN_CHANGE from the search box.
-            if (wp >> 16) as u32 == EN_CHANGE && lp as HWND == a.edit {
+            if (wp >> 16) as u32 == EN_CHANGE && lp as HWND == a.edit && !a.quiet {
                 search();
             }
             0
@@ -1531,10 +1713,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_LBUTTONDOWN => {
             let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
-            if btn_at(x, y).is_some() {
-                // Either button flips the preview: the toggle both ways, ✕ off.
+            if let Some(b) = btn_at(x, y) {
                 a.hover_btn = None;
-                toggle_preview();
+                match b {
+                    Btn::Usage if a.usage.is_some() => exit_usage(),
+                    Btn::Usage => usage_of_selection(),
+                    // The toggle flips the preview both ways; ✕ closes it.
+                    Btn::Toggle | Btn::Close => toggle_preview(),
+                }
                 unsafe { SetFocus(a.edit) };
                 return 0;
             }
@@ -1739,6 +1925,9 @@ fn main() {
         previews: ptx,
         preview_seq: 0,
         hover_btn: None,
+        usage: None,
+        usage_select: None,
+        quiet: false,
     });
     APP.store(Box::into_raw(app), Ordering::Relaxed);
     unsafe { SendMessageW(edit, WM_SETFONT, crate::app().fonts.input as usize, 1) };
@@ -1758,8 +1947,13 @@ fn main() {
         let ws = w(q);
         unsafe { SetWindowTextW(edit, ws.as_ptr()) };
     }
-    if args.iter().any(|a| a == "--show" || a == "--query") {
+    if args.iter().any(|a| a == "--show" || a == "--query" || a == "--usage") {
         show();
+    }
+    // `qasdw --usage [folder]`: open on what takes the space (every drive).
+    if let Some(i) = args.iter().position(|a| a == "--usage") {
+        let dir = args.get(i + 1).filter(|a| !a.starts_with("--")).map_or_else(|| "/".to_string(), |p| String::from_utf8_lossy(&sys::from_user(p)).into_owned());
+        open_usage(dir);
     }
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };

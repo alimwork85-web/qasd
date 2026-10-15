@@ -355,6 +355,15 @@ impl Engine {
         self.s.live.read().unwrap().as_ref().map(|l| l.tree_size(path))
     }
 
+    /// What takes the space in folder `path` (index form): its children
+    /// with their sizes, largest first. See `Live::usage`.
+    pub fn usage(&self, path: &[u8]) -> Option<Vec<(Vec<u8>, u8, u64, u32)>> {
+        let g = self.s.live.read().unwrap();
+        let mut v = g.as_ref()?.usage(path)?;
+        v.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        Some(v)
+    }
+
     /// Name search.
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
         WARM_UNTIL.store(0, Ordering::Relaxed);

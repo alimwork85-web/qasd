@@ -210,6 +210,55 @@ impl Live {
         total + self.over.range(lo..hi).filter(|(_, o)| o.kind & 3 == walk::KIND_FILE).map(|(_, o)| o.size).sum::<u64>()
     }
 
+    /// What takes the space in folder `path`: each child with its size (a
+    /// folder: everything in it), from the index alone. One pass over the
+    /// folder's subtree: each entry lies in exactly one child's range.
+    /// (name, kind, size, mtime); None if the index has no such folder.
+    pub fn usage(&self, path: &[u8]) -> Option<Vec<(Vec<u8>, u8, u64, u32)>> {
+        let path = normalize(path);
+        let mut out: BTreeMap<Vec<u8>, (u8, u64, u32)> = BTreeMap::new();
+        let base_dir = self.base_alive(&path).and_then(|e| self.base.dir_of(e));
+        if let Some(d) = base_dir {
+            for c in self.base.children(d) {
+                if self.is_dead(c as u32) {
+                    continue;
+                }
+                let kind = self.base.kind(c);
+                let size = match self.base.dir_of(c as u32) {
+                    Some(cd) if kind & 3 == KIND_DIR => {
+                        let (a, b) = (self.base.dir_start(cd as usize), self.base.dir_end(cd as usize));
+                        (a..b).filter(|&i| !self.is_dead(i) && self.base.kind(i as usize) & 3 == walk::KIND_FILE).map(|i| self.base.size_of(i as usize)).sum()
+                    }
+                    _ if kind & 3 == walk::KIND_FILE => self.base.size_of(c),
+                    _ => 0,
+                };
+                out.insert(self.base.name(c).to_vec(), (kind, size, self.base.mtime(c)));
+            }
+        }
+        // The overlay: new children, and new files deeper in a child.
+        let (lo, hi) = subtree_bounds(&path);
+        let plen = lo.len();
+        for (k, o) in self.over.range(lo..hi) {
+            let rest = &k[plen..];
+            let (child, deeper) = match rest.iter().position(|&b| b == b'/') {
+                Some(i) => (&rest[..i], true),
+                None => (rest, false),
+            };
+            let e = out.entry(child.to_vec()).or_insert((if deeper { KIND_DIR } else { o.kind }, 0, if deeper { 0 } else { o.mtime }));
+            if !deeper {
+                e.0 = o.kind;
+                e.2 = o.mtime;
+            }
+            if o.kind & 3 == walk::KIND_FILE {
+                e.1 += o.size;
+            }
+        }
+        if base_dir.is_none() && out.is_empty() && !self.over.contains_key(&path) {
+            return None;
+        }
+        Some(out.into_iter().map(|(n, (k, s, m))| (n, k, s, m)).collect())
+    }
+
     /// Alive base entry for a path, if the base has one.
     fn base_alive(&self, path: &[u8]) -> Option<u32> {
         self.base.lookup(path).filter(|&e| !self.is_dead(e))
