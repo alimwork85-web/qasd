@@ -22,10 +22,11 @@ usage:
   qasd serve                 run the daemon in the foreground
   qasd status
   qasd stop                  stop the daemon (keeps the index)
-  qasd install [--login]     copy to %LOCALAPPDATA%\\Qasd\\bin and add it to PATH;
+  qasd install [--login]     copy qasd and the search window to %LOCALAPPDATA%\\Qasd\\bin,
+                             add it to PATH, start the window (Alt+Q) with Windows;
                              --login also starts the daemon at sign-in
                              (run from an administrator terminal to index every folder)
-  qasd uninstall             remove the sign-in task (keeps the index)
+  qasd uninstall             remove the sign-in task and the window's start with Windows (keeps the index)
   qasd bench <query...>      time a query in-process against the saved index
 
 examples:
@@ -211,52 +212,85 @@ fn add_to_path(dir: &str) -> bool {
     run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])
 }
 
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Copy `from` over `to` (through a temp name, so a reinstall from the
+/// installed copy works too).
+fn put(from: &std::path::Path, to: &std::path::Path) {
+    if from.canonicalize().ok() == to.canonicalize().ok() {
+        return;
+    }
+    let tmp = to.with_extension("new");
+    std::fs::copy(from, &tmp).and_then(|_| std::fs::rename(&tmp, to)).unwrap_or_else(|e| die(&format!("copy {}: {e}", to.display())));
+}
+
+/// Start the search window as the signed-in user. From an elevated
+/// terminal it goes through Explorer, so files it opens don't run as
+/// administrator.
+fn start_window(win: &std::path::Path) {
+    let w = win.display().to_string();
+    if sys::elevated() {
+        run_quiet("explorer.exe", &[&w]);
+    } else {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new(win).creation_flags(0x0000_0008).spawn(); // DETACHED_PROCESS
+    }
+}
+
 fn install(login: bool) {
     // A plain reinstall keeps an existing sign-in task.
     let login = login || task_exists();
     let bin = bin_dir().join("qasd.exe");
-    // Stop the old daemon so the next one runs the new binary.
+    let win = bin_dir().join("qasdw.exe");
+    // Stop the old daemon and window so the new binaries can replace them.
     run_quiet("schtasks", &["/End", "/TN", TASK]);
+    run_quiet("taskkill", &["/F", "/IM", "qasdw.exe"]);
     server::stop(&data_dir()).unwrap_or_else(|e| die(&e));
     std::fs::create_dir_all(bin_dir()).unwrap();
-    // Copy then rename, so reinstalling from the installed copy works too.
     let exe = std::env::current_exe().unwrap();
-    if exe.canonicalize().ok() != bin.canonicalize().ok() {
-        let tmp = bin.with_extension("new");
-        std::fs::copy(&exe, &tmp).and_then(|_| std::fs::rename(&tmp, &bin)).unwrap_or_else(|e| die(&format!("copy: {e}")));
+    put(&exe, &bin);
+    let win_src = exe.with_file_name("qasdw.exe");
+    let has_window = win_src.exists() || win.exists();
+    if win_src.exists() {
+        put(&win_src, &win);
     }
     let on_path = add_to_path(&bin_dir().display().to_string());
     let agents = format!("for coding agents: claude mcp add -s user qasd -- \"{}\" mcp", bin.display());
     let path_note = if on_path { "added to PATH (open a new terminal)" } else { "could not add it to PATH; add it by hand" };
-    if !login {
-        println!("installed {}; {path_note}; the daemon starts on first use\n{agents}", bin.display());
+    println!("installed {} ({path_note})", bin.display());
+    if has_window {
+        // The search window starts with Windows; Alt+Q opens it.
+        let val = format!("\"{}\"", win.display());
+        run_quiet("reg", &["add", RUN_KEY, "/v", "Qasd", "/t", "REG_SZ", "/d", &val, "/f"]);
+        start_window(&win);
+        println!("search window: press Alt+Q (starts with Windows; tray icon to quit)");
+    }
+    // A sign-in task needs an administrator; without one, the search window
+    // (or the first search) starts the daemon.
+    if !login || !sys::elevated() {
+        let note = if login { " (a sign-in task needs an administrator terminal; the search window starts the daemon instead)" } else { "" };
+        println!("the daemon starts on first use{note}\n{agents}");
         return;
     }
-    // At sign-in, with the highest rights the user has: as administrator,
-    // every folder is indexed, and no UAC prompt shows each time.
+    // At sign-in, with the highest rights: every folder is indexed, and no
+    // UAC prompt shows each time.
     let tr = format!("\"{}\" serve", bin.display());
-    let elevated = sys::elevated();
-    let mut args = vec!["/Create", "/F", "/TN", TASK, "/SC", "ONLOGON", "/TR", &tr];
-    if elevated {
-        args.extend(["/RL", "HIGHEST"]);
-    }
+    let args = ["/Create", "/F", "/TN", TASK, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", &tr];
     if !run_quiet("schtasks", &args) {
         die("schtasks /Create failed");
     }
     run_quiet("schtasks", &["/Run", "/TN", TASK]);
-    let rights = if elevated { "as administrator" } else { "without administrator rights (run install from an admin terminal to index every folder)" };
-    println!("installed {} ({path_note}); the daemon starts at sign-in {rights}\n{agents}", bin.display());
+    println!("the daemon starts at sign-in as administrator\n{agents}");
 }
 
 fn uninstall() {
     run_quiet("schtasks", &["/End", "/TN", TASK]);
     let removed = run_quiet("schtasks", &["/Delete", "/F", "/TN", TASK]);
+    run_quiet("reg", &["delete", RUN_KEY, "/v", "Qasd", "/f"]);
+    run_quiet("taskkill", &["/F", "/IM", "qasdw.exe"]);
     let _ = server::stop(&data_dir());
-    if removed {
-        println!("removed the sign-in task \"{TASK}\"; index kept in {}", data_dir().display());
-    } else {
-        println!("no sign-in task to remove; index kept in {}", data_dir().display());
-    }
+    let what = if removed { format!("the sign-in task \"{TASK}\" and ") } else { String::new() };
+    println!("removed {what}the search window's start with Windows; index kept in {}", data_dir().display());
 }
 
 fn die(msg: &str) -> ! {

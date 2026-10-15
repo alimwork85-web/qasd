@@ -908,27 +908,7 @@ fn kind_name(k: u8) -> &'static str {
 
 /// Connect to the daemon, starting it if it isn't running.
 pub fn connect(dir: &Path) -> std::io::Result<Conn> {
-    let name = pipe_name(dir);
-    if let Ok(s) = Conn::connect(&name) {
-        return Ok(s);
-    }
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
-    use std::os::windows::process::CommandExt;
-    let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    // No console window, and not in the console's process group: closing the
-    // terminal that started it doesn't end it.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log).spawn()?;
-    for _ in 0..1500 {
-        std::thread::sleep(Duration::from_millis(2));
-        if let Ok(s) = Conn::connect(&name) {
-            return Ok(s);
-        }
-    }
-    Conn::connect(&name)
+    qasd::pipe::connect_or_start(dir, &std::env::current_exe()?)
 }
 
 #[cfg(test)]

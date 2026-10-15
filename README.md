@@ -1,8 +1,8 @@
 # Qasd (قَصْد)
 
 Whole-disk file search for Windows: fuzzy names that forgive typos, and indexed
-search inside files. A CLI with a small background daemon, a Rust crate, or an
-MCP server for coding agents.
+search inside files. A search window on Alt+Q, a CLI with a small background
+daemon, a Rust crate, or an MCP server for coding agents.
 
 Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch)
 (macOS, MIT). The search engine (name index, fuzzy matching, trigram content
@@ -11,10 +11,31 @@ rewritten for Windows.
 
 ```
 cargo build --release
-.\target\release\qasd.exe install          # -> %LOCALAPPDATA%\Qasd\bin\qasd.exe, added to PATH
+.\target\release\qasd.exe install          # -> %LOCALAPPDATA%\Qasd\bin, on PATH, window starts with Windows
 qasd qasd main                             # find files by name
 qasd "ext:rs grep:apply_dir"               # search inside files
 ```
+
+Or download the zip from [Releases](https://github.com/alimwork85-web/qasd/releases),
+extract it, and double-click `install.cmd`.
+
+## The search window (Alt+Q)
+
+Press **Alt+Q** anywhere: a search box opens over whatever you're doing, with
+results as you type, each with its file icon and folder.
+
+| Key | |
+|---|---|
+| typing | search (names, or `grep:` inside files) |
+| ↑ ↓, PgUp PgDn | move |
+| Enter | open the file |
+| Ctrl+Enter | show it in its folder |
+| Ctrl+C | copy its path |
+| Esc, or clicking elsewhere | close |
+
+It lives in the tray (right-click: start with Windows, quit). It's plain
+Win32, so it opens instantly and uses a few MB. It follows the system's
+light or dark theme and DPI. Files you open rank higher next time.
 
 ## Speed
 
@@ -120,14 +141,14 @@ followed. Paths are kept as WTF-8, so any NTFS name round-trips.
 fsearch التي تعمل على الماك فقط. تبحث في أسماء الملفات بتسامح مع الأخطاء
 الإملائية، وفي محتوى الملفات النصية عبر فهرس، ويبقى الفهرس محدّثاً لحظياً.
 
-**التثبيت:**
+**التثبيت:** نزّل ملف zip من صفحة [الإصدارات](https://github.com/alimwork85-web/qasd/releases)،
+وفك الضغط، ثم اضغط مرتين على `install.cmd`.
 
-```
-cargo build --release
-.\target\release\qasd.exe install
-```
+**نافذة البحث:** اضغط **Alt+Q** في أي مكان واكتب اسم الملف، فتظهر النتائج أثناء الكتابة.
+Enter يفتح الملف، وCtrl+Enter يفتح مجلده، وCtrl+C ينسخ مساره، وEsc يغلق النافذة.
+تعمل النافذة مع تشغيل ويندوز، وأيقونتها في شريط المهام بجانب الساعة.
 
-بعدها افتح طرفية جديدة واكتب `qasd` متبوعاً بما تبحث عنه:
+ويمكنك البحث من الطرفية أيضاً: اكتب `qasd` متبوعاً بما تبحث عنه:
 
 ```
 qasd تقرير                         # بالاسم

@@ -38,6 +38,37 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
+/// Connect to the daemon serving `dir`, starting it (`exe serve`, detached,
+/// no window) if nobody listens.
+pub fn connect_or_start(dir: &Path, exe: &Path) -> io::Result<Conn> {
+    let name = name(dir);
+    if let Ok(s) = Conn::connect(&name) {
+        return Ok(s);
+    }
+    std::fs::create_dir_all(dir)?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
+    use std::os::windows::process::CommandExt;
+    // No console window, and not in the console's process group: closing the
+    // terminal that started it doesn't end it.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new(exe)
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()?;
+    for _ in 0..1500 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        if let Ok(s) = Conn::connect(&name) {
+            return Ok(s);
+        }
+    }
+    Conn::connect(&name)
+}
+
 /// One end of a connected pipe.
 pub struct Conn(HANDLE);
 
