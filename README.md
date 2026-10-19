@@ -27,6 +27,7 @@ Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch) (ma
 - [Environment variables](#environment-variables)
 - [How it works on Windows](#how-it-works-on-windows)
 - [Limitations](#limitations)
+- [Contributing](#contributing)
 - [العربية](#بالعربية)
 - [License and credits](#license-and-credits)
 
@@ -274,6 +275,14 @@ Symbolic links, junctions and mount points are listed as links and never followe
 - Content search covers only text files under the size limits above. Binary files and large files are not searched inside.
 - Files that exist only in OneDrive's cloud are never downloaded by a search or a preview.
 - Index times on the first run depend on the number of files. Without administrator rights, the first index of a large drive is slower (see [Speed](#speed)).
+
+---
+
+## Contributing
+
+Contributions are welcome from any developer: bug reports, fixes, features, and documentation. Read [CONTRIBUTING.md](https://github.com/alimwork85-web/qasd/blob/main/CONTRIBUTING.md) for how to report an issue, set up the project, and open a pull request.
+
+Short version: open an issue for bugs and ideas, run `cargo fmt` and `cargo test`, and open a pull request.
 
 ---
 
