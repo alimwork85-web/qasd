@@ -28,6 +28,15 @@ Qasd is written in Rust and targets Windows 10 and 11.
 5. If the change is visible to users, add an entry to `CHANGELOG.md` in the same format as the existing entries.
 6. Open a pull request. Describe what changed, why, and how you tested it.
 
+## Releases and versions
+
+Qasd is pre-1.0, so the version number follows these rules:
+
+- **Patch** (0.7.0 → 0.7.1): bug fixes and small corrections that do not change how the tool is used.
+- **Minor** (0.7.x → 0.8.0): new features, and any change that alters behavior, query syntax, or the API.
+
+Every release gets an entry in `CHANGELOG.md`, with the date and a short list of what changed. Maintainers create the release; contributors do not change the version number in a pull request.
+
 ## Code style
 
 - Follow the patterns already used in the module you are changing.
