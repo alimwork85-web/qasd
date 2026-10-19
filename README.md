@@ -1,7 +1,3 @@
- الـ README الجديد (انسخه في README.md)
-markdown
-
-نسخ
 <div align="center">
 
 # Qasd (قَصْد)
@@ -56,9 +52,11 @@ cargo build --release
 .\target\release\qasd.exe install    # -> %LOCALAPPDATA%\Qasd\bin, on PATH
 qasd main                            # find files by name
 qasd "ext:rs grep:apply_dir"         # search inside files
+
 Or download the zip from Releases, extract it, and double-click install.cmd.
 
 Features
+
 Instant search window
 Alt+Q anywhere
 Open the file / its folder
@@ -77,7 +75,10 @@ CLI search
 qasd <query>
 MCP server for agents
 qasd mcp
+
 Performance
+Measured on Windows 11, C: with ~2 million entries:
+
 Measured on Windows 11, C: with ~2 million entries:
 
 First full index, as admin (raw MFT read)
@@ -94,23 +95,20 @@ Name index on disk
 59 MB
 Daemon memory
 ~50 MB
-Queries
-bash
 
-نسخ
+Queries
 qasd "readme in:~\Documents"              # inside a folder
 qasd "type:image size:>5mb mtime:<7d"     # filters
 qasd "ext:rs regex:fn\s+\w+_dir"          # regex inside files
 qasd "sym:apply_dir"                      # where it's defined
 qasd "src/**/*.{c,h} !test/ init"         # globs, in or out
 qasd "git:modified in:~\Projects\app"     # git status filters
+
 Words are fuzzy and forgive a typo at any letter (mian.rs finds main.rs). Also 'exact, ^prefix, suffix$, !exclude.
 
 MCP server for coding agents
-bash
-
-نسخ
 claude mcp add -s user qasd -- "%LOCALAPPDATA%\Qasd\bin\qasd.exe" mcp
+
 Tools exposed: find_files, grep, multi_grep. Give your AI agent instant whole-disk search without crawling the filesystem.
 
 How it works on Windows
@@ -129,7 +127,6 @@ Symlinks, junctions and mount points are listed as links and never followed. Pat
 License
 MIT. Qasd © 2026 Ali Alhumedi. Built on fsearch © 2026 Noah Dunnagan.
 
-<div dir="rtl" align="right">
 قصد (Qasd)
 بحث فائق السرعة في كل أقراص ويندوز. اضغط Alt+Q في أي مكان، ابحث في الأسماء بتسامح مع الأخطاء الإملائية، وفي محتوى الملفات عبر فهرس نصي، مع خادم MCP لوكلاء البرمجة بالذكاء الاصطناعي.
 
