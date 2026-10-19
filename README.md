@@ -1,184 +1,314 @@
-<div align="center">
-
 # Qasd (قَصْد)
 
-[![GitHub release](https://img.shields.io/github/v/release/alimwork85-web/qasd)](https://github.com/alimwork85-web/qasd/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-99.7%25-orange)](https://www.rust-lang.org)
-[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6)](https://www.microsoft.com/windows)
+[![Release](https://img.shields.io/github/v/release/alimwork85-web/qasd?color=2a78d6)](https://github.com/alimwork85-web/qasd/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/alimwork85-web/qasd/total?color=2a78d6)](https://github.com/alimwork85-web/qasd/releases)
+[![Windows 10/11](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?logo=windows)](https://github.com/alimwork85-web/qasd/releases/latest)
+[![Rust](https://img.shields.io/badge/Rust-fast-dea584?logo=rust)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/alimwork85-web/qasd/blob/main/LICENSE)
 
-**Whole-disk file search for Windows.** Alt+Q anywhere, typo-tolerant names, indexed grep inside files, and an MCP server for AI coding agents.
+**Developer:** Ali Alhumedi · [Download](https://github.com/alimwork85-web/qasd/releases/latest) · [Changelog / سجل التغييرات](https://github.com/alimwork85-web/qasd/blob/main/CHANGELOG.md)
 
-[Download](https://github.com/alimwork85-web/qasd/releases/latest) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/alimwork85-web/qasd/issues)
+**Qasd** is a whole-disk file search for Windows. It finds files by name even when you mistype them, searches inside text files through an index, and shows what is using your disk space. It has a search window on **Alt+Q**, a command-line interface with a small background daemon, a Rust crate, and an MCP server for coding agents.
 
-</div>
-
----
-
-<div align="center">
-  <img src="assets/screenshot-main.png" alt="Qasd search window" width="700" /><br>
-  <em>The search window: press Alt+Q anywhere — results appear as you type</em>
-</div>
-
-<div align="center">
-  <img src="assets/screenshot-grep.png" alt="Qasd grep search" width="700" /><br>
-  <em>Indexed grep — search inside your files in milliseconds</em>
-</div>
-
-<div align="center">
-  <img src="assets/screenshot-disk.png" alt="Qasd disk usage" width="700" /><br>
-  <em>Disk usage view: Ctrl+U to see what takes the space</em>
-</div>
+Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch) (macOS, MIT). The search engine (name index, fuzzy matching, trigram content index, query language, git filters, MCP) comes from fsearch. The macOS-specific layers were rewritten for Windows.
 
 ---
 
-## Why Qasd?
+## Contents
 
-| Feature | Everything | Qasd |
-|---|---|---|
-| Instant name search | ✅ | ✅ + typo-tolerant fuzzy matching |
-| Search inside files (grep) | ❌ | ✅ Indexed, ~0.3 ms |
-| AI agent support (MCP) | ❌ | ✅ Built-in MCP server |
-| Disk usage analyzer | ❌ | ✅ Ctrl+U, computed from index |
-| Open source | ✅ | ✅ Rust, MIT |
-| Lightweight UI | ✅ | ✅ Plain Win32, a few MB |
+- [Quick start](#quick-start)
+- [Search window (Alt+Q)](#search-window-altq)
+- [Query syntax](#query-syntax)
+- [Disk usage](#disk-usage)
+- [Content search (grep)](#content-search-grep)
+- [Speed](#speed)
+- [Administrator rights](#administrator-rights)
+- [API and MCP](#api-and-mcp)
+- [Environment variables](#environment-variables)
+- [How it works on Windows](#how-it-works-on-windows)
+- [Limitations](#limitations)
+- [العربية](#بالعربية)
+- [License and credits](#license-and-credits)
 
-A Windows port of [fsearch](https://github.com/) (macOS). The search engine is fsearch's; every Windows layer was rewritten from scratch.
+---
 
 ## Quick start
 
-```bash
+**Option 1: build from source**
+
+```powershell
 cargo build --release
-.\target\release\qasd.exe install    # -> %LOCALAPPDATA%\Qasd\bin, on PATH
-qasd main                            # find files by name
-qasd "ext:rs grep:apply_dir"         # search inside files
+.\target\release\qasd.exe install   # copies to %LOCALAPPDATA%\Qasd\bin, adds it to PATH, starts with Windows
+```
 
-Or download the zip from Releases, extract it, and double-click install.cmd.
+**Option 2: download**
 
-Features
+1. Download the zip from [Releases](https://github.com/alimwork85-web/qasd/releases).
+2. Extract it and double-click `install.cmd`.
 
-Instant search window
-Alt+Q anywhere
-Open the file / its folder
-Enter / Ctrl+Enter
-Copy path
-Ctrl+C
-Preview pane
-Ctrl+P
-Disk usage
-Ctrl+U or the pie button
-Drag a result
-Drop into mail, editor, chat, folder
-Recent searches
-Empty box
-CLI search
-qasd <query>
-MCP server for agents
-qasd mcp
+**Then try it:**
 
-Performance
-Measured on Windows 11, C: with ~2 million entries:
+```powershell
+qasd qasd main                 # find files by name
+qasd "ext:rs grep:apply_dir"   # search inside files
+```
 
-Measured on Windows 11, C: with ~2 million entries:
+---
 
-First full index, as admin (raw MFT read)
-5.3 s
-First full index, normal user (folder crawl)
-9.5 s warm
-Restart catch-up (USN change journal)
-0.08 s
-Name lookup in the daemon
-~0.8 ms
-Grep, first page, in the daemon
-~0.3 ms
-Name index on disk
-59 MB
-Daemon memory
-~50 MB
+## Search window (Alt+Q)
 
-Queries
-qasd "readme in:~\Documents"              # inside a folder
-qasd "type:image size:>5mb mtime:<7d"     # filters
+Press **Alt+Q** anywhere. A search box opens over whatever you are doing, and results update as you type. Each result shows its file icon and folder.
+
+| Key | Action |
+| --- | --- |
+| Typing | Search by name, or use `grep:` to search inside files |
+| ↑ ↓, PgUp, PgDn | Move through results |
+| Enter | Open the file |
+| Ctrl+Enter | Show the file in its folder |
+| Ctrl+C | Copy its path |
+| Right-click, Menu key, or Shift+F10 | Open the file's Explorer context menu (open with, send to, copy, delete, properties, shell extensions). Shift+right-click shows the extended menu. |
+| Drag a result | Drop the file into any program: mail, editor, chat, or folder |
+| Ctrl+P | Show or hide the preview pane |
+| Ctrl+U, the pie button, or right-click a folder | Open disk usage (see [Disk usage](#disk-usage)) |
+| Empty search box | Show recent searches. Enter runs one again, Delete removes it. |
+| Esc, or click elsewhere | Close the window |
+
+**Preview pane.** It shows a thumbnail for images, videos, PDFs and folders. For text files it shows the first lines. For other files it shows the icon, type, size and date. Files that exist only in OneDrive's cloud are never downloaded for preview.
+
+**Other behavior:**
+
+- Each result shows its size and date. A folder's size is the total of everything inside it, summed from the index, so no disk access is needed.
+- Files you open rank higher in future searches.
+- The app lives in the system tray. Right-click the tray icon to start with Windows or quit.
+- It is plain Win32, so it opens instantly and uses a few MB of memory.
+- It follows the system's light or dark theme and DPI settings.
+
+---
+
+## Query syntax
+
+```text
+qasd "readme in:~\Documents"              # inside a folder (C:\..., ~\..., or relative)
+qasd "type:image size:>5mb mtime:<7d"     # by type, size and modification time
 qasd "ext:rs regex:fn\s+\w+_dir"          # regex inside files
-qasd "sym:apply_dir"                      # where it's defined
-qasd "src/**/*.{c,h} !test/ init"         # globs, in or out
+qasd "sym:apply_dir"                      # where a symbol is defined
+qasd "src/**/*.{c,h} !test/ init"         # globs; ! excludes
 qasd "git:modified in:~\Projects\app"     # git status filters
+```
 
-Words are fuzzy and forgive a typo at any letter (mian.rs finds main.rs). Also 'exact, ^prefix, suffix$, !exclude.
+**Matching rules:**
 
-MCP server for coding agents
+- Words are fuzzy and forgive typos: one letter in a short word, two in words of 8 or more letters. For example, `mian.rs` finds `main.rs`.
+- `'exact` matches exactly.
+- `^prefix` matches the start of a name, and `suffix$` matches the end.
+- `!exclude` leaves out matches.
+- A phrase with spaces goes in quotes, for example `grep:"fn main"`.
+
+**Filters:**
+
+| Filter | Purpose |
+| --- | --- |
+| `ext:` | File extension |
+| `type:` / `kind:` | File type or category |
+| `in:` | Folder to search in |
+| `size:` | File size |
+| `mtime:` | Modification time |
+| `path:` | Match against the full path |
+| `re:` | Regex on names |
+| `grep:` | Text inside files |
+| `regex:` | Regex inside files |
+| `sym:` | Symbol definitions |
+| `limit:` | Maximum number of results |
+| `git:` | Git status: `modified`, `staged`, `untracked`, `clean`, `tracked`, `ignored`, `conflict` |
+
+---
+
+## Disk usage
+
+Press **Ctrl+U** in the search window, click the pie button, or right-click a folder. It shows what takes up space:
+
+- The contents of a folder, largest first.
+- Each item's size, its share of the total, and a bar.
+- Every drive, when no folder is selected.
+
+Enter goes into a folder, Backspace goes up one level, and Esc returns to search. Sizes come from the index, so the view appears in a fraction of a second without reading the disk.
+
+---
+
+## Content search (grep)
+
+Qasd indexes file contents as well as names.
+
+- Text files in your user folder up to **1 MB** are indexed. Inside git repositories the limit is **10 MB**.
+- Folders that git ignores are skipped.
+- `AppData`, lockfiles, large JSON files, minified assets and build output are skipped.
+- To skip more folders, add them to `%LOCALAPPDATA%\Qasd\content-skip.txt`, one per line.
+- `in:` with a folder outside your user folder searches that folder by reading its files directly.
+
+---
+
+## Speed
+
+Measured on Windows 11 with a C: drive holding about 2 million entries.
+
+| Operation | Result |
+| --- | --- |
+| First full index, as administrator (read from the MFT) | 5.3 s |
+| First full index, as a normal user (folder crawl) | 9.5 s warm, 34 s cold |
+| Restart, catching up on changes (change journal) | 0.08 s |
+| Find a file by name, in the daemon | ~0.8 ms |
+| Grep, first page, in the daemon | ~0.3 ms |
+| CLI search, end to end (mostly Windows process start) | ~28 ms |
+| New, renamed, edited or deleted file appears in results | Under one CLI round trip (~30 ms) |
+| Name index on disk | 59 MB |
+| Daemon memory | ~50 MB |
+
+Index times and memory use depend on the number of files and the hardware.
+
+---
+
+## Administrator rights
+
+As a normal user, Qasd indexes every folder you can open. It skips the few folders that only administrators can read.
+
+If you run the daemon elevated, it also indexes those folders. It builds the index directly from each NTFS drive's master file table, which is several times faster.
+
+To avoid a UAC prompt at every start, run this from an administrator terminal:
+
+```powershell
+qasd install --login   # creates a sign-in task with highest privileges
+```
+
+The change journal (restart catch-up and overflow recovery) works with or without administrator rights.
+
+---
+
+## API and MCP
+
+**JSON API.** The daemon listens on the named pipe `\\.\pipe\qasd-<hash>`. Only the current user can open it. You can also use `qasd stdio`. Paths on the wire use the index form, `/C:/Users/me/x.txt`, and requests accept either form.
+
+```json
+{"q": "qasd main", "limit": 20, "offset": 20}
+{"op": "grep", "pattern": "apply_dir", "in": "C:\\Users\\me\\Projects", "context": 2}
+{"q": "main.rs", "boost": true, "near": "C:\\Users\\me\\app\\src\\lib.rs", "git": true}
+{"op": "open", "path": "C:\\Users\\me\\app\\src\\main.rs"}
+{"op": "recent", "in": "~\\Projects\\app"}
+```
+
+**MCP server for coding agents.** `qasd mcp` runs an MCP server over stdio. It provides `find_files`, `grep` and `multi_grep`.
+
+```powershell
 claude mcp add -s user qasd -- "%LOCALAPPDATA%\Qasd\bin\qasd.exe" mcp
+```
 
-Tools exposed: find_files, grep, multi_grep. Give your AI agent instant whole-disk search without crawling the filesystem.
+**Other commands:**
 
-How it works on Windows
-getattrlistbulk crawl
-Raw $MFT parse as admin; FindFirstFileExW otherwise
-FSEvents
-ReadDirectoryChangesW per drive root
-FSEvents replay
-NTFS USN change journal — no admin needed
-Unix socket
-Named pipe, overlapped I/O, ACL limited to the user
-launchd
-Task Scheduler sign-in task
-Symlinks, junctions and mount points are listed as links and never followed. Paths are kept as WTF-8, so any NTFS name round-trips.
+| Command | Purpose |
+| --- | --- |
+| `qasd status` | Show daemon status |
+| `qasd stop` | Stop the daemon |
+| `qasd serve` | Run the daemon in the foreground |
+| `qasd uninstall` | Remove Qasd |
+| `qasd bench <query>` | Benchmark a query |
 
-License
-MIT. Qasd © 2026 Ali Alhumedi. Built on fsearch © 2026 Noah Dunnagan.
+---
 
-قصد (Qasd)
-بحث فائق السرعة في كل أقراص ويندوز. اضغط Alt+Q في أي مكان، ابحث في الأسماء بتسامح مع الأخطاء الإملائية، وفي محتوى الملفات عبر فهرس نصي، مع خادم MCP لوكلاء البرمجة بالذكاء الاصطناعي.
+## Environment variables
 
-تحميل · سجل التغييرات · المشاكل
+| Variable | Effect |
+| --- | --- |
+| `QASD_DRIVES=C,D` | Index only these drives (default: all fixed and removable drives) |
+| `QASD_NO_REMOVABLE=1` | Leave out USB drives and memory cards |
+| `QASD_SKIP=D:\VMs;E:\backup` | Leave out these folders |
 
-لماذا قصد؟
-بحث فوري في الأسماء
-✅
-✅ + تسامح مع الأخطاء
-البحث داخل الملفات
-❌
-✅ فهرس نصي، ~0.3 مللي ثانية
-دعم وكلاء الذكاء الاصطناعي (MCP)
-❌
-✅ خادم مدمج
-تحليل استخدام القرص
-❌
-✅ Ctrl+U من الفهرس مباشرةً
-مفتوح المصدر
-✅
-✅ Rust، رخصة MIT
-قصد نسخة لويندوز من أداة fsearch التي تعمل على الماك فقط. محرك البحث hers لفsearch، وكل طبقات ويندوز كُتبت من جديد.
+---
 
-التثبيت
-نزّل ملف ZIP من صفحة الإصدارات، فك الضغط، واضغط مرتين على install.cmd.
+## How it works on Windows
 
-أو من المصدر:
+| fsearch (macOS) | Qasd (Windows) |
+| --- | --- |
+| `getattrlistbulk` crawl | As administrator: each NTFS drive's `$MFT` is read and parsed directly (names, parents, sizes, times, links). Otherwise: `FindFirstFileExW` with `FindExInfoBasic` and `LARGE_FETCH`, with folders crawled in parallel using rayon. |
+| FSEvents | `ReadDirectoryChangesW` on each drive root, covering the whole subtree |
+| FSEvents replay after restart or dropped events | NTFS change journal (USN), readable without administrator rights. Only folders changed since the last run are relisted. Folder modification times are used where the journal cannot say. |
+| Unix socket | Named pipe with overlapped I/O, ACL limited to the current user and SYSTEM |
+| malloc space-efficient mode | mimalloc, with `mi_collect` when idle |
+| launchd LaunchAgent | Task Scheduler sign-in task |
+| `~/Library/Application Support/FSearch` | `%LOCALAPPDATA%\Qasd` |
+| `/Users/me/x` | `/C:/Users/me/x` internally (one tree, drives under `/`); `C:\Users\me\x` on screen |
 
-bash
+Symbolic links, junctions and mount points are listed as links and never followed. Paths are stored as WTF-8, so any NTFS file name round-trips correctly.
 
-نسخ
-cargo build --release
-.\target\release\qasd.exe install
-الاستخدام
-اضغط Alt+Q في أي مكان واكتب اسم الملف. Enter يفتح الملف، وCtrl+Enter يفتح مجلده، وCtrl+C ينسخ مساره، وCtrl+P يعرض المعاينة، وCtrl+U يعرض ما يشغل مساحة القرص.
+---
 
-ومن الطرفية:
+## Qasd or Everything?
 
-bash
+[Everything](https://www.voidtools.com/) by voidtools is the best-known file search on Windows, and it is free. Qasd is a different tool with a different focus. Use this table to choose:
 
-نسخ
-qasd تقرير                         # بالاسم
-qasd "ext:md grep:الميزانية"        # داخل الملفات
-qasd "in:~\Desktop pdf"            # داخل مجلد
-الكلمات ضبابية وتتسامح مع الأخطاء: كتابة mian.rs تجد main.rs.
+| | Everything | Qasd |
+| --- | --- | --- |
+| Price and license | Freeware | MIT, open source |
+| Search by file name | Yes, instant | Yes, with typo tolerance |
+| Search inside files | Yes, through `content:`, but files are not indexed and the search is slow | Yes, through a trigram content index for text files up to 1 MB (10 MB in git repos) |
+| Regex | Yes | Yes (`regex:` and `re:`) |
+| Boolean operators | Yes (`\|`, `!`, default AND) | Yes (`!` for exclusion, plus `'exact`, `^prefix`, `suffix$`) |
+| Git status filters | No | Yes (`git:modified`, `git:staged`, and others) |
+| Disk usage view | Not in its documentation | Yes (Ctrl+U) |
+| Preview pane | Not in its documentation | Yes (Ctrl+P) |
+| Remote access | HTTP and ETP servers, and a command-line client (es.exe), in the full version | JSON API over a named pipe, and an MCP server for coding agents |
+| Maturity | Established, with versions running from Windows XP to Windows 11 | New project, first public release |
 
-لتعمل الخدمة تلقائياً عند تسجيل الدخول: qasd install --login. وإذا شغّلته بصلاحيات المدير فستُفهرَس أيضاً المجلدات المحمية وتُبنى الفهرسة من MFT مباشرةً (أسرع بمرات).
+**Choose Everything** if you mainly search by file name, want the most mature tool, or need network and SDK integrations.
 
-الأداء
-على ويندوز 11 بقرص فيه نحو مليوني ملف: الفهرسة الكاملة كمسؤول تستغرق 5.3 ثانية، والتحديث بعد إعادة التشغيل 0.08 ثانية، والبحث عن اسم أقل من مللي ثانية واحدة.
+**Choose Qasd** if you want one tool that combines name search, typo tolerance, content search, and disk usage, and you want to read or change the code.
 
-الرخصة
-MIT. قصد © 2026 علي الحميدي. مبني على fsearch © 2026 Noah Dunnagan.
+**Notes on the comparison:**
 
-</div> ```
+- Qasd's speed numbers are measured on one machine. They have not been run side by side with Everything on the same hardware.
+- "Not in its documentation" means the features are not described in Everything's official FAQ. It does not mean they are impossible.
+- Everything's official FAQ says it indexes only file and folder names, and that content search is slow because content is not indexed.
+
+---
+
+## Limitations
+
+- Content search covers only text files under the size limits above. Binary files and large files are not searched inside.
+- Files that exist only in OneDrive's cloud are never downloaded by a search or a preview.
+- Index times on the first run depend on the number of files. Without administrator rights, the first index of a large drive is slower (see [Speed](#speed)).
+
+---
+
+## بالعربية
+
+**قصد** أداة بحث فائقة السرعة في كل أقراص ويندوز، وهي نسخة لويندوز من أداة fsearch التي تعمل على ماك فقط. تبحث في أسماء الملفات بتسامح مع الأخطاء الإملائية، وفي محتوى الملفات النصية عبر فهرس يبقى محدّثاً لحظياً.
+
+**التثبيت:** نزّل ملف zip من صفحة [الإصدارات](https://github.com/alimwork85-web/qasd/releases)، ثم فك الضغط واضغط مرتين على `install.cmd`.
+
+**نافذة البحث:** اضغط **Alt+Q** في أي مكان واكتب اسم الملف، فتظهر النتائج أثناء الكتابة.
+
+- **Enter** يفتح الملف، و**Ctrl+Enter** يفتح مجلده، و**Ctrl+C** ينسخ مساره، و**Esc** يغلق النافذة.
+- النقر بالزر الأيمن على أي نتيجة يعرض قائمة الملف نفسها التي تظهر في المستكشف.
+- اسحب أي نتيجة وأفلتها في برنامج آخر.
+- **Ctrl+P** يُظهر لوحة المعاينة أو يخفيها.
+- عندما يكون مربع البحث فارغاً تظهر عمليات البحث السابقة.
+
+**حجم المجلدات:** اضغط **Ctrl+U** لمعرفة ما يشغل مساحة القرص: المحتويات من الأكبر إلى الأصغر، مع الحجم والنسبة وشريط يوضحها. وهذا كله يُحسب من الفهرس دون قراءة القرص.
+
+**البحث من الطرفية:**
+
+```powershell
+qasd تقرير                          # بالاسم
+qasd "ext:md grep:الميزانية"         # داخل الملفات
+qasd "in:~\Desktop pdf"             # داخل مجلد محدد
+```
+
+**التشغيل التلقائي:** `qasd install --login` يجعل الخدمة تعمل عند تسجيل الدخول. وإذا شغّلته من طرفية بصلاحيات المدير فستُفهرَس أيضاً المجلدات التي لا يقرؤها إلا المدير.
+
+**الأقراص الخارجية:** تُفهرس أسماء الملفات على الأقراص الثابتة وعلى أقراص USB وبطاقات الذاكرة تلقائياً. القرص المتصل يُفهرس خلال ثانية، والمفصول يختفي من النتائج.
+
+---
+
+## License and credits
+
+MIT License. Copyright © 2026 **Ali Alhumedi**. Built on fsearch, copyright © 2026 Noah Dunnagan.
+
+See [LICENSE](https://github.com/alimwork85-web/qasd/blob/main/LICENSE).
