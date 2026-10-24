@@ -2,3 +2,6 @@ target/
 .probe/
 .livetest/
 .replaytest/
+
+# Hermes project rules (local, not committed)
+.hermes.md
