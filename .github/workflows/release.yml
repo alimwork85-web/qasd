@@ -1,0 +1,46 @@
+# Builds Qasd on GitHub and attaches the zip to the release, so every download is built from the published code.
+# Runs when a release is published (write its notes first, then publish), or by hand for an existing tag.
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and attach (e.g. v0.7.1)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cargo build --release --locked
+          # The file's version must match the tag, or Cargo.toml was not bumped.
+          $v = $env:TAG.TrimStart('v')
+          $file = (Get-Item target/release/qasd.exe).VersionInfo.ProductVersion
+          if ($file -ne $v) { throw "Cargo.toml says $file, the tag says $v" }
+          New-Item -ItemType Directory pkg | Out-Null
+          Copy-Item target/release/qasd.exe, target/release/qasdw.exe, assets/install.cmd, README.md, CHANGELOG.md, LICENSE pkg/
+          Compress-Archive -Path pkg/* -DestinationPath "Qasd-$env:TAG-windows-x64.zip"
+
+      - name: Attach to the release
+        shell: pwsh
+        run: gh release upload $env:TAG "Qasd-$env:TAG-windows-x64.zip" --clobber
