@@ -396,9 +396,10 @@ pub struct Query {
     /// query string can say everything.
     pub grep: Option<String>,
     pub grep_mode: GrepMode,
-    /// The words in the other Unicode normalization form, if that differs
-    /// (see `other_form`): `Searcher::search` looks for those too.
-    pub alt: Option<Vec<Token>>,
+    /// The words in other spellings: the other Unicode normalization form,
+    /// if that differs (see `other_form`), and Arabic letter variants (see
+    /// `arabic_forms`). `Searcher::search` looks for those too.
+    pub alt: Vec<Vec<Token>>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -438,12 +439,16 @@ impl Query {
         // An accented word may be stored composed (as keyboards type it) or
         // decomposed ("é" as "e" and U+0301, as HFS+ and some apps write
         // names): its other form is searched too.
-        if !s.is_ascii()
-            && let Some(o) = other_form(s)
-            && let Ok(oq) = Query::parse_form(&o, home)
-            && oq.tokens.len() == q.tokens.len()
-        {
-            q.alt = Some(oq.tokens);
+        // Arabic names are spelled with or without hamza, ة or ه, ى or ي:
+        // those spellings are searched too.
+        if !s.is_ascii() {
+            for o in other_form(s).into_iter().chain(arabic_forms(s)) {
+                if let Ok(oq) = Query::parse_form(&o, home)
+                    && oq.tokens.len() == q.tokens.len()
+                {
+                    q.alt.push(oq.tokens);
+                }
+            }
         }
         Ok(q)
     }
@@ -995,6 +1000,65 @@ fn other_form(s: &str) -> Option<String> {
 fn normalized(s: &str, form: isize) -> Option<String> {
     use unicode_normalization::UnicodeNormalization;
     Some(if form == 0 { s.nfd().collect() } else { s.nfc().collect() })
+}
+
+/// The most other Arabic spellings of one query `Query::parse` searches:
+/// each costs a search of its own.
+const ARABIC_FORMS: usize = 8;
+
+/// `s` with its Arabic words in the spellings names often use instead:
+/// diacritics and tatweel dropped, the first alef as ا, أ or إ (the one
+/// after a leading ال, as in الأحمد), a final ة or ه, a final ى or ي.
+/// Filters (`in:`, `grep:`) stay as typed. At most `ARABIC_FORMS`, `s`
+/// itself left out; one more letter off is left to typo matching.
+fn arabic_forms(s: &str) -> Vec<String> {
+    let quote = |w: String| if w.contains(' ') { format!("\"{w}\"") } else { w };
+    let words = split_words(s);
+    let same = words.iter().cloned().map(quote).collect::<Vec<_>>().join(" ");
+    let mut out = vec![String::new()];
+    for (i, w) in words.iter().enumerate() {
+        let forms = if w.contains(':') { vec![w.clone()] } else { arabic_word_forms(w) };
+        out = out
+            .iter()
+            .flat_map(|p| forms.iter().map(move |f| if i == 0 { quote(f.clone()) } else { format!("{p} {}", quote(f.clone())) }))
+            .take(ARABIC_FORMS + 1)
+            .collect();
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|f| *f != same && seen.insert(f.clone()));
+    out.truncate(ARABIC_FORMS);
+    out
+}
+
+/// One word's spellings for `arabic_forms`, the word as typed (without
+/// diacritics) first.
+fn arabic_word_forms(w: &str) -> Vec<String> {
+    let base: Vec<char> = w.chars().filter(|c| !matches!(c, '\u{064B}'..='\u{0652}' | '\u{0640}')).collect();
+    let mut forms = vec![base.clone()];
+    let swap = |forms: &mut Vec<Vec<char>>, at: usize, set: &[char]| {
+        let Some(&c) = forms[0].get(at) else { return };
+        if !set.contains(&c) {
+            return;
+        }
+        *forms = forms
+            .iter()
+            .flat_map(|f| {
+                std::iter::once(c).chain(set.iter().copied().filter(move |&x| x != c)).map(move |x| {
+                    let mut g = f.clone();
+                    g[at] = x;
+                    g
+                })
+            })
+            .collect();
+    };
+    let alef = if base.starts_with(&['ا', 'ل']) { 2 } else { 0 };
+    let alefs: &[char] = if base.get(alef) == Some(&'آ') { &['آ', 'ا', 'أ', 'إ'] } else { &['ا', 'أ', 'إ'] };
+    swap(&mut forms, alef, alefs);
+    if let Some(last) = base.len().checked_sub(1).filter(|&l| l > 0) {
+        swap(&mut forms, last, &['ة', 'ه']);
+        swap(&mut forms, last, &['ى', 'ي']);
+    }
+    forms.into_iter().map(|f| f.into_iter().collect()).collect()
 }
 
 /// Split on spaces, keeping "double quoted" runs together.
@@ -2021,14 +2085,17 @@ impl Searcher<'_> {
     /// The top `q.limit` hits. A word that takes typos and that no top hit
     /// has well (as typed, or with typos keeping the first letter) is
     /// likely misspelled worse: then the search runs again, deep.
-    /// Words in two Unicode forms (`Query::alt`) are looked for in both.
+    /// Words in other spellings (`Query::alt`) are looked for in each.
     pub fn search(&self, q: &Query) -> Vec<Hit> {
-        let Some(alt) = &q.alt else { return self.search_form(q) };
-        let other = Query { tokens: alt.clone(), alt: None, ..q.clone() };
+        if q.alt.is_empty() {
+            return self.search_form(q);
+        }
         let mut hits = self.search_form(q);
-        // Without a deep typo search of its own: a form the disk may not
+        // Without a deep typo search of their own: a form the disk may not
         // hold at all would run one every time.
-        hits.extend(self.search_once(&other));
+        for alt in &q.alt {
+            hits.extend(self.search_once(&Query { tokens: alt.clone(), alt: Vec::new(), ..q.clone() }));
+        }
         // An entry both find, once, at its best.
         hits.sort_by_cached_key(|h| std::cmp::Reverse(self.sort_key(h)));
         let mut seen = std::collections::HashSet::new();
@@ -4041,6 +4108,40 @@ mod tests {
     fn mtime_older_than_u32() {
         let q = Query::parse("mtime:>140y", "/h").unwrap();
         assert_eq!(q.mtime, (0, 0));
+    }
+
+    /// Arabic names are found whichever way hamza, ة/ه and ى/ي are spelled.
+    #[test]
+    fn arabic_spellings() {
+        let names = ["أسامة.pdf", "الأحمد.txt", "مستشفى.md", "اسامه2.doc", "zzz.txt"];
+        let (mut buf, mut ents) = (Vec::new(), Vec::new());
+        for n in names {
+            ents.push(RawEnt { name_off: buf.len() as u32, name_len: n.len() as u16, kind: KIND_FILE, size: 1, mtime: 1, child: NONE });
+            buf.extend_from_slice(n.as_bytes());
+        }
+        let l = Live::new(Index::build(vec![Listing { id: 0, names: buf, ents }], 0, 0, b"/h"));
+        let found = |q: &str| {
+            let mut p = Vec::new();
+            let hits = Searcher { live: &l }.search(&Query::parse(q, "/h").unwrap());
+            hits.iter().map(|h| (l.base.path(h.idx as usize, &mut p), String::from_utf8_lossy(&p).into_owned()).1).collect::<Vec<_>>()
+        };
+        let has = |q: &str, name: &str| assert!(found(q).iter().any(|p| p.ends_with(name)), "{q} should find {name}: {:?}", found(q));
+        has("اسامه", "أسامة.pdf");
+        has("أسامة", "اسامه2.doc");
+        has("إسامة", "أسامة.pdf");
+        has("الاحمد", "الأحمد.txt");
+        has("مستشفي", "مستشفى.md");
+        has("أُسَامَة", "أسامة.pdf");
+        assert!(found("اسامه").iter().all(|p| !p.ends_with("zzz.txt")));
+    }
+
+    /// Filters keep their Arabic as typed; the forms are capped.
+    #[test]
+    fn arabic_forms_cap_and_filters() {
+        assert!(arabic_forms("in:~\\أحمد ملف").is_empty());
+        assert!(arabic_forms("readme").is_empty());
+        assert!(arabic_forms("أحمد أسامة إيمان سلوى").len() <= ARABIC_FORMS);
+        assert!(arabic_forms("اسامه").contains(&"أسامة".to_string()));
     }
 
     /// type:app takes symlinks as folders; kind:file after it means files.
