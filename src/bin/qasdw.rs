@@ -138,6 +138,12 @@ fn theme(light: bool) -> Theme {
 }
 
 fn system_light() -> bool {
+    // QASD_THEME=light|dark overrides (for screenshots of both themes).
+    match std::env::var("QASD_THEME").as_deref() {
+        Ok("light") => return true,
+        Ok("dark") => return false,
+        _ => {}
+    }
     let key = w(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
     let val = w("AppsUseLightTheme");
     let mut v = 1u32;
@@ -234,6 +240,66 @@ enum Btn {
     Toggle,
     /// On the preview pane: close it.
     Close,
+    /// Under an empty search box: a ready-made search (index in CHIPS).
+    Chip(usize),
+}
+
+/// Ready-made searches, one click each: (label, query). They only fill
+/// the box; the query language does the rest.
+const CHIPS: &[(&str, &str)] = &[
+    ("صور هذا الأسبوع", "type:image mtime:<7d"),
+    ("مستندات هذا الأسبوع", "type:doc mtime:<7d"),
+    ("ملفات كبيرة", "size:>1gb"),
+    ("ملفات مكررة", "dupe:"),
+];
+/// The strip of CHIPS, under the search box (96 DPI).
+const CHIPS_H: i32 = 40;
+
+/// The chips show while the box is empty (and not in the disk usage view).
+fn chips_shown() -> bool {
+    let a = app();
+    a.usage.is_none() && a.query.trim().is_empty()
+}
+
+/// Where the results start: under the search box, and the chips if shown.
+fn head() -> i32 {
+    scale(HEAD) + if chips_shown() { scale(CHIPS_H) } else { 0 }
+}
+
+/// The chips' rectangles, right to left from the right edge (Arabic).
+fn chip_rects() -> Vec<RECT> {
+    let a = app();
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(a.hwnd, &mut rc) };
+    let mut right = scale(WIDTH).min(rc.right) - scale(12);
+    let (top, bottom) = (scale(HEAD) + scale(2), scale(HEAD) + scale(CHIPS_H) - scale(8));
+    let mut out = Vec::new();
+    unsafe {
+        let dc = GetDC(a.hwnd);
+        let old = SelectObject(dc, a.fonts.sub);
+        for (label, _) in CHIPS {
+            let t: Vec<u16> = label.encode_utf16().collect();
+            let mut sz = SIZE { cx: 0, cy: 0 };
+            GetTextExtentPoint32W(dc, t.as_ptr(), t.len() as i32, &mut sz);
+            let wd = sz.cx + scale(24);
+            out.push(RECT { left: right - wd, top, right, bottom });
+            right -= wd + scale(8);
+        }
+        SelectObject(dc, old);
+        ReleaseDC(a.hwnd, dc);
+    }
+    out
+}
+
+/// Put chip `i`'s query in the box (it runs as typed).
+fn apply_chip(i: usize) {
+    let a = app();
+    let q = CHIPS[i].1;
+    let n = q.encode_utf16().count();
+    unsafe {
+        SetWindowTextW(a.edit, w(q).as_ptr());
+        SendMessageW(a.edit, EM_SETSEL, n, n as isize);
+    }
 }
 
 /// The preview button, at the right end of the search box.
@@ -253,7 +319,7 @@ fn usage_rect() -> RECT {
 
 /// The close button, at the top corner of the preview pane.
 fn close_rect() -> RECT {
-    let (left, top) = (scale(WIDTH) + scale(22), scale(HEAD) + scale(PAD) / 2 + scale(10));
+    let (left, top) = (scale(WIDTH) + scale(22), head() + scale(PAD) / 2 + scale(10));
     RECT { left, top, right: left + scale(28), bottom: top + scale(28) }
 }
 
@@ -269,6 +335,8 @@ fn btn_at(x: i32, y: i32) -> Option<Btn> {
         Some(Btn::Usage)
     } else if previewing() && inside(&close_rect(), x, y) {
         Some(Btn::Close)
+    } else if chips_shown() && y < head() {
+        chip_rects().iter().position(|r| inside(r, x, y)).map(Btn::Chip)
     } else {
         None
     }
@@ -698,7 +766,7 @@ fn window_height() -> i32 {
     }
     let body = if rows > 0 { rows * ROW + PAD } else { 0 };
     let foot = if a.query.trim().is_empty() && a.items.is_empty() { 0 } else { FOOT };
-    scale(HEAD + body + foot)
+    head() + scale(body + foot)
 }
 
 /// Size the window to its contents, keeping it centered where it is.
@@ -1226,7 +1294,20 @@ fn paint() {
         SetTextColor(dc, if a.usage.is_some() { t.accent } else { t.sub });
         draw_text(dc, "\u{EB05}", &mut ug, DT_CENTER | DT_VCENTER);
 
+        // The ready-made searches, while the box is empty.
+        if chips_shown() {
+            SelectObject(dc, a.fonts.sub);
+            for (i, r) in chip_rects().iter().enumerate() {
+                let lit = a.hover_btn == Some(Btn::Chip(i));
+                round_fill(dc, r, if lit { t.sel } else { t.input }, scale(14));
+                SetTextColor(dc, if lit { t.accent } else { t.text });
+                let mut tr = *r;
+                draw_text(dc, CHIPS[i].0, &mut tr, DT_CENTER | DT_VCENTER | DT_RTLREADING);
+            }
+        }
+
         // Results.
+        let head = self::head();
         let mut y = head;
         if !a.items.is_empty() {
             fill(dc, &RECT { left: 0, top: y, right: cw, bottom: y + 1 }, t.line);
@@ -1426,7 +1507,7 @@ fn row_at(x: i32, y: i32) -> Option<usize> {
     if previewing() && x >= scale(WIDTH) {
         return None;
     }
-    let top = scale(HEAD) + scale(PAD) / 2;
+    let top = head() + scale(PAD) / 2;
     if y < top {
         return None;
     }
@@ -1669,7 +1750,7 @@ fn context_menu(i: usize, at: Option<POINT>) {
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
     let pt = at.unwrap_or_else(|| {
         let row = (i.saturating_sub(a.top)) as i32;
-        let mut p = POINT { x: scale(62), y: scale(HEAD) + scale(PAD) / 2 + (row + 1) * scale(ROW) - scale(8) };
+        let mut p = POINT { x: scale(62), y: head() + scale(PAD) / 2 + (row + 1) * scale(ROW) - scale(8) };
         unsafe { ClientToScreen(a.hwnd, &mut p) };
         p
     });
@@ -1803,6 +1884,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     Btn::Usage => usage_of_selection(),
                     // The toggle flips the preview both ways; ✕ closes it.
                     Btn::Toggle | Btn::Close => toggle_preview(),
+                    Btn::Chip(i) => apply_chip(i),
                 }
                 unsafe { SetFocus(a.edit) };
                 return 0;
