@@ -926,9 +926,31 @@ fn hide() {
     unsafe { ShowWindow(app().hwnd, SW_HIDE) };
 }
 
+/// Menus (the right-click menu, the tray's) in the theme's colors: uxtheme
+/// exports SetPreferredAppMode (#135) and FlushMenuThemes (#136) by number
+/// only, as Notepad++ and others use them; if they are missing, menus stay light.
+fn menu_theme(light: bool) {
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    unsafe {
+        let ux = LoadLibraryW(w("uxtheme.dll").as_ptr());
+        if ux.is_null() {
+            return;
+        }
+        if let Some(f) = GetProcAddress(ux, 135 as _) {
+            let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(f);
+            set(if light { 3 } else { 2 }); // ForceLight / ForceDark
+        }
+        if let Some(f) = GetProcAddress(ux, 136 as _) {
+            let flush: unsafe extern "system" fn() = std::mem::transmute(f);
+            flush();
+        }
+    }
+}
+
 fn set_theme() {
     let a = app();
     let t = theme(a.light);
+    menu_theme(a.light);
     unsafe {
         if !a.edit_brush.is_null() {
             DeleteObject(a.edit_brush);
@@ -2048,12 +2070,265 @@ struct Deleted {
 }
 
 /// A message box over the window (which stays up meanwhile).
+/// A question in the window's own look (theme, Arabic, rounded), in place
+/// of the system's message box: the first paragraph is the question, the
+/// rest its details. Takes MB_OK or MB_YESNO (with MB_DEFBUTTON2), and
+/// MB_ICONWARNING or MB_ICONINFORMATION; answers like MessageBoxW.
 fn ask(text: &str, flags: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
     let a = app();
     a.menu_up = true;
-    let r = unsafe { MessageBoxW(a.hwnd, w(text).as_ptr(), w("قصد").as_ptr(), flags | MB_RTLREADING | MB_RIGHT) };
+    let r = dialog::run(text, flags);
     a.menu_up = false;
     r
+}
+
+mod dialog {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct State {
+        title: String,
+        body: String,
+        yes_no: bool,
+        warn: bool,
+        /// The focused button: 0 yes/OK, 1 no.
+        focus: usize,
+        hover: Option<usize>,
+        answer: Option<MESSAGEBOX_RESULT>,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    }
+
+    const CLASS: &str = "QasdAsk";
+    const W: i32 = 440;
+    const PAD: i32 = 22;
+    const BTN_H: i32 = 34;
+    const BTN_W: i32 = 104;
+
+    fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+        STATE.with(|s| s.borrow_mut().as_mut().map(f))
+    }
+
+    /// The buttons, right to left: yes/OK first (index 0).
+    fn buttons(hwnd: HWND, yes_no: bool) -> Vec<RECT> {
+        let mut rc: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetClientRect(hwnd, &mut rc) };
+        let (bottom, mut right) = (rc.bottom - scale(PAD), rc.right - scale(PAD));
+        let mut out = Vec::new();
+        for _ in 0..if yes_no { 2 } else { 1 } {
+            out.push(RECT { left: right - scale(BTN_W), top: bottom - scale(BTN_H), right, bottom });
+            right -= scale(BTN_W) + scale(10);
+        }
+        out
+    }
+
+    fn body_rect(hwnd: HWND) -> RECT {
+        let mut rc: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetClientRect(hwnd, &mut rc) };
+        RECT { left: scale(PAD), top: scale(PAD) + scale(34), right: rc.right - scale(PAD), bottom: rc.bottom - scale(PAD) - scale(BTN_H) - scale(16) }
+    }
+
+    /// The details' height at width `w`.
+    fn body_h(dc: HDC, body: &str, w: i32) -> i32 {
+        if body.is_empty() {
+            return 0;
+        }
+        let ws: Vec<u16> = body.encode_utf16().collect();
+        let mut r = RECT { left: 0, top: 0, right: w, bottom: 0 };
+        unsafe {
+            let old = SelectObject(dc, app().fonts.ui);
+            DrawTextW(dc, ws.as_ptr(), ws.len() as i32, &mut r, DT_CALCRECT | DT_WORDBREAK | DT_RTLREADING | DT_RIGHT | DT_NOPREFIX);
+            SelectObject(dc, old);
+        }
+        r.bottom
+    }
+
+    pub fn run(text: &str, flags: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
+        let a = app();
+        let (title, body) = match text.split_once("\n\n") {
+            Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
+            None => match text.split_once('\n') {
+                Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
+                None => (text.trim().to_string(), String::new()),
+            },
+        };
+        let yes_no = flags & MB_YESNO != 0;
+        let warn = flags & MB_ICONWARNING != 0;
+        let focus = if yes_no && flags & MB_DEFBUTTON2 != 0 { 1 } else { 0 };
+        STATE.with(|s| *s.borrow_mut() = Some(State { title, body: body.clone(), yes_no, warn, focus, hover: None, answer: None }));
+        let class = w(CLASS);
+        unsafe {
+            let hinst = GetModuleHandleW(std::ptr::null());
+            let wc = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                style: CS_DROPSHADOW,
+                lpfnWndProc: Some(proc_),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinst,
+                hIcon: std::ptr::null_mut(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                hbrBackground: std::ptr::null_mut(),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class.as_ptr(),
+                hIconSm: std::ptr::null_mut(),
+            };
+            RegisterClassExW(&wc); // (fails harmlessly once registered)
+            // Height from the details, wrapped at the dialog's width.
+            let dc = GetDC(a.hwnd);
+            let bh = body_h(dc, &body, scale(W) - 2 * scale(PAD));
+            ReleaseDC(a.hwnd, dc);
+            let h = scale(PAD) + scale(34) + bh + if bh > 0 { scale(16) } else { 0 } + scale(BTN_H) + scale(PAD);
+            let wd = scale(W);
+            let mut or: RECT = std::mem::zeroed();
+            GetWindowRect(a.hwnd, &mut or);
+            let (x, y) = ((or.left + or.right) / 2 - wd / 2, or.top + scale(70));
+            let title = w("قصد");
+            let hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, class.as_ptr(), title.as_ptr(), WS_POPUP, x, y, wd, h, a.hwnd, std::ptr::null_mut(), hinst, std::ptr::null());
+            if hwnd.is_null() {
+                // No dialog of ours: the system's will do.
+                return MessageBoxW(a.hwnd, w(text).as_ptr(), title.as_ptr(), flags | MB_RTLREADING | MB_RIGHT);
+            }
+            let round: i32 = 2;
+            DwmSetWindowAttribute(hwnd, 33, (&raw const round).cast(), 4);
+            let t = theme(a.light);
+            let dark: i32 = (!a.light) as i32;
+            DwmSetWindowAttribute(hwnd, 20, (&raw const dark).cast(), 4);
+            DwmSetWindowAttribute(hwnd, 34, (&raw const t.border).cast(), 4);
+            EnableWindow(a.hwnd, 0);
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+            let mut msg: MSG = std::mem::zeroed();
+            while with(|s| s.answer.is_none()).unwrap_or(false) && GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            EnableWindow(a.hwnd, 1);
+            DestroyWindow(hwnd);
+            SetForegroundWindow(a.hwnd);
+            SetFocus(a.edit);
+        }
+        let r = with(|s| s.answer).flatten().unwrap_or(if yes_no { IDNO } else { IDOK });
+        STATE.with(|s| *s.borrow_mut() = None);
+        r
+    }
+
+    fn answer(i: usize) {
+        with(|s| s.answer = Some(match (s.yes_no, i) {
+            (true, 0) => IDYES,
+            (true, _) => IDNO,
+            _ => IDOK,
+        }));
+    }
+
+    fn paint(hwnd: HWND) {
+        let a = app();
+        let t = theme(a.light);
+        let Some((title, body, yes_no, warn, focus, hover)) = with(|s| (s.title.clone(), s.body.clone(), s.yes_no, s.warn, s.focus, s.hover)) else { return };
+        unsafe {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let dc = CreateCompatibleDC(hdc);
+            let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            let old = SelectObject(dc, bmp);
+            SetBkMode(dc, TRANSPARENT as i32);
+            fill(dc, &rc, t.bg);
+            // The sign, at the start (right), then the question.
+            let danger = if a.light { rgb(0xC2410C) } else { rgb(0xFDBA74) };
+            SelectObject(dc, a.fonts.glyph);
+            SetTextColor(dc, if warn { danger } else { t.accent });
+            let mut gr = RECT { left: rc.right - scale(PAD) - scale(26), top: scale(PAD), right: rc.right - scale(PAD), bottom: scale(PAD) + scale(26) };
+            draw_text(dc, if warn { "\u{E7BA}" } else { "\u{E946}" }, &mut gr, DT_CENTER | DT_VCENTER);
+            SelectObject(dc, a.fonts.name);
+            SetTextColor(dc, t.text);
+            let mut tr = RECT { left: scale(PAD), top: scale(PAD), right: rc.right - scale(PAD) - scale(36), bottom: scale(PAD) + scale(26) };
+            draw_text(dc, &title, &mut tr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
+            if !body.is_empty() {
+                SelectObject(dc, a.fonts.ui);
+                SetTextColor(dc, t.sub);
+                let mut br = body_rect(hwnd);
+                let ws: Vec<u16> = body.encode_utf16().collect();
+                DrawTextW(dc, ws.as_ptr(), ws.len() as i32, &mut br, DT_WORDBREAK | DT_RTLREADING | DT_RIGHT | DT_NOPREFIX);
+            }
+            // Buttons: the first one (yes/OK) filled; the focused one ringed.
+            let labels: &[&str] = if yes_no { &["نعم", "لا"] } else { &["حسنًا"] };
+            SelectObject(dc, a.fonts.ui);
+            for (i, r) in buttons(hwnd, yes_no).iter().enumerate() {
+                let primary = i == 0;
+                let fillc = match (primary, hover == Some(i)) {
+                    (true, _) => if warn && yes_no { danger } else { t.accent },
+                    (false, true) => t.hover,
+                    (false, false) => t.chip,
+                };
+                round_fill(dc, r, fillc, scale(R));
+                if i == focus {
+                    let ring = RECT { left: r.left - scale(3), top: r.top - scale(3), right: r.right + scale(3), bottom: r.bottom + scale(3) };
+                    round_stroke(dc, &ring, t.accent, scale(R) + scale(6));
+                }
+                SetTextColor(dc, if primary { if a.light { rgb(0xFFFFFF) } else { rgb(0x111214) } } else { t.text });
+                let mut lr = *r;
+                draw_text(dc, labels[i], &mut lr, DT_CENTER | DT_VCENTER | DT_RTLREADING);
+            }
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+            SelectObject(dc, old);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            EndPaint(hwnd, &ps);
+        }
+    }
+
+    unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        let at = |lp: LPARAM| ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+        let yes_no = with(|s| s.yes_no).unwrap_or(false);
+        match msg {
+            WM_PAINT => {
+                paint(hwnd);
+                0
+            }
+            WM_ERASEBKGND => 1,
+            WM_KEYDOWN => {
+                let n = if yes_no { 2 } else { 1 };
+                match wp as u16 {
+                    VK_RETURN | VK_SPACE => {
+                        let f = with(|s| s.focus).unwrap_or(0);
+                        answer(f);
+                    }
+                    VK_ESCAPE => answer(n - 1),
+                    VK_LEFT | VK_RIGHT | VK_TAB => {
+                        with(|s| s.focus = (s.focus + 1) % n);
+                        unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                    }
+                    _ => {}
+                }
+                0
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = at(lp);
+                let h = buttons(hwnd, yes_no).iter().position(|r| inside(r, x, y));
+                if with(|s| std::mem::replace(&mut s.hover, h) != h).unwrap_or(false) {
+                    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+                }
+                0
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = at(lp);
+                if let Some(i) = buttons(hwnd, yes_no).iter().position(|r| inside(r, x, y)) {
+                    answer(i);
+                }
+                0
+            }
+            WM_CLOSE => {
+                answer(if yes_no { 1 } else { 0 });
+                0
+            }
+            _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+        }
+    }
 }
 
 /// "3 ملفات": Arabic counted nouns, Western digits.
