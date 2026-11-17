@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="210" viewBox="0 0 800 210" role="img" aria-label="Name search from the command line, same machine, same 8 queries, 50 results each, median: Qasd 26.3 ms, Everything 44.9 ms">
+  <style>
+    .bg { fill: #fcfcfb; }
+    .t1 { fill: #0b0b0b; }
+    .t2 { fill: #52514e; }
+    .mu { fill: #898781; }
+    .grid { stroke: #e1e0d9; }
+    .bar { fill: #2a78d6; }
+    .bar2 { fill: #a3a29c; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1a1a19; }
+      .t1 { fill: #ffffff; }
+      .t2 { fill: #c3c2b7; }
+      .grid { stroke: #2c2c2a; }
+      .bar { fill: #3987e5; }
+      .bar2 { fill: #6b6a65; }
+    }
+    text { font-family: Segoe UI, Tahoma, Arial, sans-serif; }
+  </style>
+  <rect class="bg" width="800" height="210" rx="12"/>
+  <text class="t1" x="24" y="38" font-size="18" font-weight="600">Name search from the command line (qasd.exe vs es.exe)</text>
+  <text class="t2" x="24" y="62" font-size="14">Milliseconds, lower is better · median of 8 queries × 20 runs, 50 results each, same Windows 11 PC</text>
+  <!-- grid: 0..50 ms over x 200..700 (10 px/ms) -->
+  <g class="grid" stroke-width="1">
+    <path d="M200 84V172M300 84V172M400 84V172M500 84V172M600 84V172M700 84V172"/>
+  </g>
+  <g class="mu" font-size="12" text-anchor="middle">
+    <text x="200" y="192">0</text><text x="300" y="192">10</text><text x="400" y="192">20</text><text x="500" y="192">30</text><text x="600" y="192">40</text><text x="700" y="192">50 ms</text>
+  </g>
+  <g font-size="14">
+    <text class="t2" x="188" y="115" text-anchor="end">Qasd</text>
+    <path class="bar" d="M200 100H459a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H200z"/>
+    <text class="t1" x="473" y="117" font-weight="600">26.3 ms</text>
+
+    <text class="t2" x="188" y="155" text-anchor="end">Everything 1.4.1</text>
+    <path class="bar2" d="M200 140H645a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H200z"/>
+    <text class="t1" x="659" y="157" font-weight="600">44.9 ms</text>
+  </g>
+</svg>

@@ -158,11 +158,13 @@ As a normal user, Qasd indexes every folder you can open. It skips the few folde
 
 If you run the daemon elevated, it also indexes those folders. It builds the index directly from each NTFS drive's master file table, which is several times faster.
 
-To avoid a UAC prompt at every start, run this from an administrator terminal:
+To index everything without a UAC prompt at every start, run this once. It asks for administrator rights one time (UAC) and creates a sign-in task with the highest privileges:
 
 ```powershell
-qasd install --login   # creates a sign-in task with highest privileges
+qasd install --login
 ```
+
+Folders that were refused while Qasd ran as a normal user are rescanned the first time it runs as administrator.
 
 The change journal (restart catch-up and overflow recovery) works with or without administrator rights.
 
@@ -241,13 +243,19 @@ Symbolic links, junctions and mount points are listed as links and never followe
 | Remote access | HTTP and ETP servers, and a command-line client (es.exe), in the full version | JSON API over a named pipe, and an MCP server for coding agents |
 | Maturity | Established, with versions running from Windows XP to Windows 11 | New project, first public release |
 
+**Measured side by side** on the same Windows 11 PC, both indexing the same 2.18 million files and folders, both asked for 50 results through their command-line clients:
+
+![Name search: Qasd 26.3 ms, Everything 44.9 ms](assets/vs-everything.svg)
+
+Both times are mostly the cost of starting a Windows process; each tool's own lookup takes about a millisecond. To repeat it: start Everything and Qasd, then run `.\examples\bench_everything.ps1 -Es path\to\es.exe`.
+
 **Choose Everything** if you mainly search by file name, want the most mature tool, or need network and SDK integrations.
 
 **Choose Qasd** if you want one tool that combines name search, typo tolerance, Arabic spellings, duplicate files and disk usage, and you want to read or change the code.
 
 **Notes on the comparison:**
 
-- Qasd's speed numbers are measured on one machine. They have not been run side by side with Everything on the same hardware.
+- All speed numbers are from one machine. The side-by-side test covers name search only, end to end from the command line; it does not compare indexing time or memory.
 - "Not in its documentation" means the features are not described in Everything's official FAQ. It does not mean they are impossible.
 
 ---
