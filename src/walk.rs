@@ -220,7 +220,8 @@ fn descend<'s>(s: &Scope<'s>, path: Vec<u8>, mut l: Listing, ctx: &'s Ctx) {
             }
             let mut l = Listing { id, names: Vec::new(), ents: Vec::new() };
             if !list_into(&child, &mut l) {
-                if unsafe { GetLastError() } == ERROR_ACCESS_DENIED && SKIP.get().is_some_and(|v| !v.is_empty()) {
+                // Recorded even unelevated: once run as administrator, the daemon rescans these.
+                if unsafe { GetLastError() } == ERROR_ACCESS_DENIED {
                     DENIED.lock().unwrap().push(child);
                 }
                 push(l, ctx);

@@ -25,7 +25,7 @@ usage:
   qasd install [--login]     copy qasd and the search window to %LOCALAPPDATA%\\Qasd\\bin,
                              add it to PATH, start the window (Alt+Q) with Windows;
                              --login also starts the daemon at sign-in
-                             (run from an administrator terminal to index every folder)
+                             as administrator (asks once, UAC), to index every folder from the MFT
   qasd uninstall             remove the sign-in task and the window's start with Windows (keeps the index)
   qasd bench <query...>      time a query in-process against the saved index
 
@@ -297,6 +297,15 @@ fn start_window(win: &std::path::Path) {
 fn install(login: bool) {
     // A plain reinstall keeps an existing sign-in task.
     let login = login || task_exists();
+    // The sign-in task needs an administrator: ask once (UAC) and let the
+    // elevated copy install everything. Declined: install without it below.
+    if login && !sys::elevated() {
+        println!("asking for administrator rights once, to index every folder from the MFT at sign-in...");
+        if rerun_elevated("install --login") && task_exists() {
+            println!("done: the daemon starts at sign-in as administrator; search window: Alt+Q");
+            return;
+        }
+    }
     let bin = bin_dir().join("qasd.exe");
     let win = bin_dir().join("qasdw.exe");
     // Stop the old daemon and window so the new binaries can replace them.
