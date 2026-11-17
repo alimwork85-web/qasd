@@ -43,7 +43,7 @@ const MERGE_CAP: usize = 96 << 20;
 /// The bytes of deleted and replaced files stay under 1/DEAD of the index
 /// (see `Content::merge_plan`).
 const DEAD: usize = 16;
-const MAGIC: &[u8; 8] = b"FSCSEG16";
+const MAGIC: &[u8; 8] = b"FSCSEG17";
 /// Docs per front-coded group of paths (see `Segment::path_off`).
 const PATHS: usize = 16;
 /// A list's offset flag while built: it is a bitset over the segment's
@@ -998,9 +998,17 @@ pub fn build_segment(dir: &Path, id: u64, docs: &Docs, range: std::ops::Range<us
                     ahead.push_back(open_ahead(docs.path(i + ahead.len())));
                 }
                 buf.clear();
-                let text = (ahead.pop_front().flatten())
-                    .and_then(|f| f.take(MAX_REPO_FILE + 1).read_to_end(&mut buf).ok())
-                    .is_some_and(|n| n as u64 <= MAX_REPO_FILE && is_text(&buf));
+                let opened = ahead.pop_front().flatten();
+                // PDF and Office files: their text, extracted (see `docs`).
+                let text = if crate::docs::is_doc(docs.path(i)) {
+                    drop(opened);
+                    crate::docs::text(docs.path(i)).is_some_and(|t| {
+                        buf = t;
+                        is_text(&buf)
+                    })
+                } else {
+                    opened.and_then(|f| f.take(MAX_REPO_FILE + 1).read_to_end(&mut buf).ok()).is_some_and(|n| n as u64 <= MAX_REPO_FILE && is_text(&buf))
+                };
                 let holds = if !text {
                     Holds::Nothing
                 } else {
@@ -1624,7 +1632,13 @@ impl<'a> Scope<'a> {
         };
         let Some(place) = place else { return false };
         let cap = if json_ext(name) { MAX_FILE } else { MAX_REPO_FILE };
-        let ok = if place.repo { size <= cap && name != b".git" && !binary_ext(name) } else { name_ok(name, size) };
+        let ok = if crate::docs::is_doc(name) {
+            size <= crate::docs::DOC_MAX
+        } else if place.repo {
+            size <= cap && name != b".git" && !binary_ext(name)
+        } else {
+            name_ok(name, size)
+        };
         ok && !generated(name, size) && !ignored(&place.rules, self.global.as_deref(), path, false)
     }
 
@@ -1646,7 +1660,8 @@ impl<'a> Scope<'a> {
             picked.reserve_exact(range.len());
             for i in range {
                 let (name, size) = (idx.name(i), idx.size_of(i));
-                if idx.kind(i) & 3 != KIND_FILE || live.is_dead(i as u32) || size > MAX_REPO_FILE || binary_ext(&name) {
+                let doc = crate::docs::is_doc(&name) && size <= crate::docs::DOC_MAX;
+                if idx.kind(i) & 3 != KIND_FILE || live.is_dead(i as u32) || (!doc && (size > MAX_REPO_FILE || binary_ext(&name))) {
                     continue;
                 }
                 path(i, &mut p);
@@ -3698,6 +3713,10 @@ fn match_file(g: &Grep, path: &[u8], opening: Option<&std::sync::atomic::AtomicU
 /// `match_file` on a file opened at `size` bytes.
 fn match_open(g: &Grep, path: &[u8], mut file: std::fs::File, size: u64, text: bool) -> Option<FileMatches> {
     use std::io::{Read, Seek};
+    if crate::docs::is_doc(path) {
+        drop(file);
+        return matches_in(g, path, &crate::docs::text(path)?, text);
+    }
     if size > MAX_REPO_FILE {
         return None;
     }

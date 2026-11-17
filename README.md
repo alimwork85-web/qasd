@@ -144,6 +144,7 @@ Enter goes into a folder, Backspace goes up one level, and Esc returns to search
 Qasd indexes file contents as well as names.
 
 - Text files in your user folder up to **1 MB** are indexed. Inside git repositories the limit is **10 MB**.
+- PDF and Office files (`pdf`, `docx`, `xlsx`, `pptx`, `doc`, `xls`, `ppt`) up to **64 MB** are indexed by their text. A separate `qasd doc-text` process reads each one, so a damaged file cannot stop the daemon. Scanned PDFs have no text to find, and some Arabic PDFs give lines in reverse word order.
 - Folders that git ignores are skipped.
 - `AppData`, lockfiles, large JSON files, minified assets and build output are skipped.
 - To skip more folders, add them to `%LOCALAPPDATA%\Qasd\content-skip.txt`, one per line.
@@ -275,7 +276,7 @@ Symbolic links, junctions and mount points are listed as links and never followe
 
 ## Limitations
 
-- Content search covers only text files under the size limits above. Binary files and large files are not searched inside.
+- Content search covers text, PDF and Office files under the size limits above. Other binary files, scanned PDFs (no OCR) and large files are not searched inside.
 - Files that exist only in OneDrive's cloud are never downloaded by a search or a preview.
 - Index times on the first run depend on the number of files. Without administrator rights, the first index of a large drive is slower (see [Speed](#speed)).
 
