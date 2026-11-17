@@ -4,6 +4,56 @@ Qasd — by **Ali Alhumedi**. Built on [fsearch](https://github.com/noahdunnagan
 
 ---
 
+## Unreleased — 2026-11-16
+
+### بالعربية
+
+**البحث:**
+
+1. **الأسماء العربية بكل كتاباتها:** «اسامة» تجد «أسامة»، و«مدرسه» تجد «مدرسة». تتطابق أ/إ/آ/ا وة/ه وى/ي، ويُتجاهل التشكيل والتطويل.
+2. **الكتابة بلغة الكيبورد الخطأ:** «ثقشيئث» تجد readme، والعكس كذلك.
+3. **الملفات المكررة:** `dupe:` يعرض الملفات التي لها نسخة مطابقة (1 ميغابايت فأكثر)، ويتركّب مع الفلاتر الأخرى، مثل `dupe: in:~\Pictures`.
+4. **أُزيل البحث داخل محتوى الملفات** ليبقى قصد خفيفاً: يبحث في الأسماء والصيغ فقط.
+5. **البحث عن التطبيقات المثبتة:** اكتب «الحاسبة» فيظهر تطبيق الحاسبة أعلى النتائج، والنقر يفتحه. ويجدها كذلك باسمها الإنجليزي: `notepad` تجد «المفكرة»، و`calculator` تجد «الحاسبة».
+6. **التطبيقات من الطرفية وMCP:** `qasd apps <كلمات>`، وأداة `find_apps` لوكلاء البرمجة.
+
+**النافذة (Alt+Q):**
+
+7. **بحث جاهز بنقرة:** تحت مربع البحث الفارغ أزرار «صور هذا الأسبوع» و«مستندات هذا الأسبوع» و«ملفات كبيرة» و«ملفات مكررة» و«البرامج المثبتة». كل زر يكتب استعلامه في المربع.
+8. **علامة «آمن للحذف»** على مجلدات الكاش المعروفة (مثل `%TEMP%` وكاش Chrome وEdge وBrave وFirefox)، في النتائج وفي شاشة حجم القرص. يُعرف الكاش من مكانه المعروف، لا من اسمه.
+9. **الحذف من داخل قصد:** زر Delete أو «حذف…» في القائمة. تظهر رسالة تأكيد بالاسم والمسار والحجم والوجهة. ملفاتك تذهب إلى سلة المحذوفات، ومحتوى الكاش يُحذف نهائياً (ويبقى مجلد الكاش نفسه). لا يمكن حذف جذر القرص ولا Windows ولا Program Files ولا ProgramData ولا Users ولا مجلد المستخدم ولا AppData نفسه. الروابط ونقاط الربط يُحذف الرابط وحده، والملفات المستخدمة الآن تُتخطّى ويُبلَّغ عنها.
+10. **البرامج المثبتة وإزالتها:** `app:` (أو زر «البرامج المثبتة») يعرض البرامج من قائمة ويندوز. Delete يشغّل مزيل البرنامج الرسمي، وبعد انتهائه يعرض قصد البقايا المحتملة في AppData وProgramData ومجلد التثبيت لتختار منها ما تحذفه إلى السلة، ولا يُحذف شيء تلقائياً. تطبيقات المتجر لا تظهر في هذه القائمة.
+
+**الفهرسة:**
+
+11. **فهرسة كل المجلدات بصلاحية المدير:** `qasd install --login` يطلب موافقة UAC مرة واحدة، ثم تعمل الخدمة عند تسجيل الدخول بصلاحية المدير وتقرأ الفهرس من MFT مباشرة.
+12. **مقارنة مع Everything** في صفحة المشروع، برسم بياني من قياس فعلي.
+
+### English
+
+**Search:**
+
+1. **Arabic names in all their spellings:** أ/إ/آ/ا, ة/ه and ى/ي match each other; diacritics and tatweel are ignored.
+2. **The wrong keyboard layout:** typing «ثقشيئث» finds readme, and the other way round.
+3. **Duplicates:** `dupe:` lists files with an identical copy (1 MB and up), and combines with other filters.
+4. **Content search removed**, to keep Qasd light: it searches names and formats only.
+5. **Installed apps** show on top of the results, by the name Windows shows and by their English name too (`notepad` finds المفكرة).
+6. **Apps from the CLI and MCP:** `qasd apps <words> [--json]`, and the `find_apps` MCP tool.
+
+**The window (Alt+Q):**
+
+7. **Ready-made searches:** buttons under the empty search box fill in a query (images this week, documents this week, large files, duplicates, installed programs).
+8. **"Safe to delete"** on known cache folders (`%TEMP%`, Chrome/Edge/Brave/Firefox caches...), in the results and the disk usage view. A cache is known by where it is, not by its name.
+9. **Delete from Qasd:** the Delete key or the menu, after a confirmation with the name, path, size and destination. Files go to the Recycle Bin; cache contents go for good (the cache folder itself stays). Drive roots, Windows, Program Files, ProgramData, Users, the user folder and AppData itself are refused. Links are removed as links, never followed; files in use are skipped and listed.
+10. **Installed programs:** `app:` lists them from Windows' Uninstall keys. Delete runs the program's own uninstaller; afterwards the window offers what it may have left (AppData, ProgramData, the install folder) to pick and send to the Recycle Bin. Nothing is deleted on its own. Store apps are not listed.
+
+**Indexing:**
+
+11. **Every folder indexed, as administrator:** `qasd install --login` asks UAC once; the daemon then runs elevated at sign-in and reads the MFT.
+12. **A benchmark against Everything** on the project page, with a chart of real measurements.
+
+---
+
 ## v0.7.1 — 2026-10-15
 
 ### بالعربية
