@@ -114,6 +114,13 @@ struct Theme {
     sub: u32,
     sel: u32,
     line: u32,
+    /// Under the mouse: a row or a button.
+    hover: u32,
+    /// The ready-made searches' fill.
+    chip: u32,
+    /// The window's edge.
+    border: u32,
+    /// From the icon's blue: the search glyph, the selection bar, lit buttons.
     accent: u32,
     /// The "safe to delete" tag: its text and its fill.
     safe: u32,
@@ -125,28 +132,35 @@ const fn rgb(c: u32) -> u32 {
     ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
 }
 
+// Cool neutrals with a touch of the icon's blue, so the window and the icon belong together.
 fn theme(light: bool) -> Theme {
     if light {
         Theme {
-            bg: rgb(0xF9F9F9),
+            bg: rgb(0xF6F7F9),
             input: rgb(0xFFFFFF),
-            text: rgb(0x1B1B1B),
-            sub: rgb(0x5F5F5F),
-            sel: rgb(0xE3EEFB),
-            line: rgb(0xE5E5E5),
+            text: rgb(0x16181D),
+            sub: rgb(0x5A6170),
+            sel: rgb(0xE2ECFC),
+            line: rgb(0xE3E6EB),
+            hover: rgb(0xECEEF2),
+            chip: rgb(0xECEEF2),
+            border: rgb(0xD5D9E0),
             accent: rgb(0x2563EB),
             safe: rgb(0x166534),
             safe_bg: rgb(0xDCFCE7),
         }
     } else {
         Theme {
-            bg: rgb(0x202020),
-            input: rgb(0x2B2B2B),
-            text: rgb(0xF3F3F3),
-            sub: rgb(0x9E9E9E),
-            sel: rgb(0x2E3A4B),
-            line: rgb(0x333333),
-            accent: rgb(0x4CC2FF),
+            bg: rgb(0x1C1D21),
+            input: rgb(0x27292E),
+            text: rgb(0xF2F3F5),
+            sub: rgb(0x9CA1AB),
+            sel: rgb(0x223650),
+            line: rgb(0x303238),
+            hover: rgb(0x2B2D33),
+            chip: rgb(0x2B2D33),
+            border: rgb(0x3A3D45),
+            accent: rgb(0x4FB3F6),
             safe: rgb(0x86EFAC),
             safe_bg: rgb(0x173A26),
         }
@@ -382,6 +396,10 @@ const HEAD: i32 = 60;
 const ROW: i32 = 50;
 const FOOT: i32 = 30;
 const PAD: i32 = 10;
+/// Corners: one radius for boxes, rows and buttons (as a diameter, 96 DPI);
+/// chips, tags and bars are pills.
+const R: i32 = 12;
+const PILL: i32 = i32::MAX;
 
 fn data_dir() -> PathBuf {
     qasd::default_dir(&sys::home())
@@ -887,6 +905,7 @@ fn set_theme() {
         // Dark scrollbars/caret etc. where the system draws them.
         let dark: i32 = (!a.light) as i32;
         DwmSetWindowAttribute(a.hwnd, 20, (&raw const dark).cast(), 4); // DWMWA_USE_IMMERSIVE_DARK_MODE
+        DwmSetWindowAttribute(a.hwnd, 34, (&raw const t.border).cast(), 4); // DWMWA_BORDER_COLOR
         InvalidateRect(a.edit, std::ptr::null(), 1);
     }
 }
@@ -1357,7 +1376,7 @@ fn paint() {
         // The search box.
         let head = scale(HEAD);
         let mut boxr = RECT { left: scale(8), top: scale(8), right: cw - scale(8), bottom: head - scale(8) };
-        round_fill(dc, &boxr, t.input, scale(12));
+        round_fill(dc, &boxr, t.input, scale(R));
         SelectObject(dc, a.fonts.glyph);
         SetTextColor(dc, t.accent);
         boxr.left = scale(20);
@@ -1366,9 +1385,9 @@ fn paint() {
         // The preview button: lit while the preview is on.
         let tr = toggle_rect();
         if a.preview_on {
-            round_fill(dc, &tr, t.sel, scale(8));
+            round_fill(dc, &tr, t.sel, scale(R));
         } else if a.hover_btn == Some(Btn::Toggle) {
-            round_fill(dc, &tr, t.line, scale(8));
+            round_fill(dc, &tr, t.hover, scale(R));
         }
         let mut tg = tr;
         SetTextColor(dc, if a.preview_on { t.accent } else { t.sub });
@@ -1376,9 +1395,9 @@ fn paint() {
         // The disk usage button: lit while that view is up.
         let ur = usage_rect();
         if a.usage.is_some() {
-            round_fill(dc, &ur, t.sel, scale(8));
+            round_fill(dc, &ur, t.sel, scale(R));
         } else if a.hover_btn == Some(Btn::Usage) {
-            round_fill(dc, &ur, t.line, scale(8));
+            round_fill(dc, &ur, t.hover, scale(R));
         }
         let mut ug = ur;
         SetTextColor(dc, if a.usage.is_some() { t.accent } else { t.sub });
@@ -1389,7 +1408,7 @@ fn paint() {
             SelectObject(dc, a.fonts.sub);
             for (i, r) in chip_rects().iter().enumerate() {
                 let lit = a.hover_btn == Some(Btn::Chip(i));
-                round_fill(dc, r, if lit { t.sel } else { t.input }, scale(14));
+                round_fill(dc, r, if lit { t.sel } else { t.chip }, PILL);
                 SetTextColor(dc, if lit { t.accent } else { t.text });
                 let mut tr = *r;
                 draw_text(dc, CHIPS[i].0, &mut tr, DT_CENTER | DT_VCENTER | DT_RTLREADING);
@@ -1409,11 +1428,11 @@ fn paint() {
             let it = &a.items[i];
             let row = RECT { left: scale(8), top: y, right: lw - scale(8), bottom: y + scale(ROW) };
             if i == a.sel {
-                round_fill(dc, &row, t.sel, scale(10));
+                round_fill(dc, &row, t.sel, scale(R));
                 let bar = RECT { left: row.left, top: row.top + scale(14), right: row.left + scale(3), bottom: row.bottom - scale(14) };
-                round_fill(dc, &bar, t.accent, scale(3));
+                round_fill(dc, &bar, t.accent, PILL);
             } else if a.hover == Some(i) {
-                round_fill(dc, &row, t.input, scale(10));
+                round_fill(dc, &row, t.hover, scale(R));
             }
             let left = scale(62);
             let mut right = lw - scale(20);
@@ -1463,7 +1482,7 @@ fn paint() {
                 let mut sz = SIZE { cx: 0, cy: 0 };
                 GetTextExtentPoint32W(dc, lw16.as_ptr(), lw16.len() as i32, &mut sz);
                 let tag = RECT { left: right - sz.cx - scale(16), top: y + scale(8), right, bottom: y + scale(26) };
-                round_fill(dc, &tag, t.safe_bg, scale(9));
+                round_fill(dc, &tag, t.safe_bg, PILL);
                 SetTextColor(dc, t.safe);
                 let mut tr = tag;
                 draw_text(dc, label, &mut tr, DT_CENTER | DT_VCENTER | DT_RTLREADING);
@@ -1482,11 +1501,11 @@ fn paint() {
                 let pct = format!("{:.1}%", it.share * 100.0);
                 let span = (right - left - scale(64)).max(scale(20));
                 let track = RECT { left, top: y + scale(32), right: left + span, bottom: y + scale(40) };
-                round_fill(dc, &track, t.line, scale(4));
+                round_fill(dc, &track, t.line, PILL);
                 let fillw = ((span as f32) * it.share.clamp(0.0, 1.0)) as i32;
                 if fillw > 0 {
                     let bar = RECT { left, top: track.top, right: left + fillw.max(scale(4)), bottom: track.bottom };
-                    round_fill(dc, &bar, t.accent, scale(4));
+                    round_fill(dc, &bar, t.accent, PILL);
                 }
                 let mut pr2 = RECT { left: left + span + scale(8), top: y + scale(27), right, bottom: y + scale(45) };
                 draw_text(dc, &pct, &mut pr2, DT_LEFT);
@@ -1531,7 +1550,7 @@ fn paint() {
             let shown = a.preview.as_ref().filter(|p| p.path == it.path);
             match shown {
                 Some(Preview { text: Some(lines), .. }) => {
-                    round_fill(dc, &area, t.input, scale(10));
+                    round_fill(dc, &area, t.input, scale(R));
                     SelectObject(dc, a.fonts.mono);
                     SetTextColor(dc, t.text);
                     let lh = scale(16);
@@ -1572,7 +1591,7 @@ fn paint() {
         // The preview's close button, over its corner.
         if previewing() {
             let cr = close_rect();
-            round_fill(dc, &cr, if a.hover_btn == Some(Btn::Close) { t.line } else { t.input }, scale(14));
+            round_fill(dc, &cr, if a.hover_btn == Some(Btn::Close) { t.hover } else { t.input }, PILL);
             SelectObject(dc, a.fonts.glyph_small);
             SetTextColor(dc, if a.hover_btn == Some(Btn::Close) { t.text } else { t.sub });
             let mut c = cr;
