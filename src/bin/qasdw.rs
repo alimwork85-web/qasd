@@ -191,6 +191,10 @@ struct Fonts {
     glyph: HFONT,
     /// The preview pane's close mark.
     glyph_small: HFONT,
+    /// The chips' glyphs.
+    glyph_chip: HFONT,
+    /// The empty state's glyph.
+    glyph_large: HFONT,
     /// Text files in the preview.
     mono: HFONT,
 }
@@ -213,6 +217,8 @@ impl Fonts {
             ui: font(s(13), 400, "Segoe UI"),
             glyph: font(s(18), 400, glyph_face),
             glyph_small: font(s(11), 400, glyph_face),
+            glyph_chip: font(s(14), 400, glyph_face),
+            glyph_large: font(s(36), 400, glyph_face),
             mono: font(s(12), 400, "Consolas"),
         }
     }
@@ -224,6 +230,8 @@ impl Fonts {
             DeleteObject(self.ui);
             DeleteObject(self.glyph);
             DeleteObject(self.glyph_small);
+            DeleteObject(self.glyph_chip);
+            DeleteObject(self.glyph_large);
             DeleteObject(self.mono);
         }
     }
@@ -282,13 +290,15 @@ enum Btn {
 
 /// Ready-made searches, one click each: (label, query). They only fill
 /// the box; the query language does the rest.
-const CHIPS: &[(&str, &str)] = &[
-    ("صور هذا الأسبوع", "type:image mtime:<7d"),
-    ("مستندات هذا الأسبوع", "type:doc mtime:<7d"),
-    ("ملفات كبيرة", "size:>1gb"),
-    ("ملفات مكررة", "dupe:"),
-    ("البرامج المثبتة", "app:"),
+const CHIPS: &[(&str, &str, &str)] = &[
+    ("صور هذا الأسبوع", "type:image mtime:<7d", "\u{E91B}"),
+    ("مستندات هذا الأسبوع", "type:doc mtime:<7d", "\u{E8A5}"),
+    ("ملفات كبيرة", "size:>1gb", "\u{EDA2}"),
+    ("ملفات مكررة", "dupe:", "\u{E8C8}"),
+    ("البرامج المثبتة", "app:", "\u{E71D}"),
 ];
+/// A chip's glyph, and the room it takes (96 DPI).
+const CHIP_GLYPH: i32 = 22;
 /// The strip of CHIPS, under the search box (96 DPI).
 const CHIPS_H: i32 = 40;
 
@@ -314,11 +324,11 @@ fn chip_rects() -> Vec<RECT> {
     unsafe {
         let dc = GetDC(a.hwnd);
         let old = SelectObject(dc, a.fonts.ui);
-        for (label, _) in CHIPS {
+        for (label, _, _) in CHIPS {
             let t: Vec<u16> = label.encode_utf16().collect();
             let mut sz = SIZE { cx: 0, cy: 0 };
             GetTextExtentPoint32W(dc, t.as_ptr(), t.len() as i32, &mut sz);
-            let wd = sz.cx + scale(24);
+            let wd = sz.cx + scale(24 + CHIP_GLYPH);
             out.push(RECT { left: right - wd, top, right, bottom });
             right -= wd + scale(8);
         }
@@ -356,8 +366,10 @@ fn usage_rect() -> RECT {
 
 /// The close button, at the top corner of the preview pane.
 fn close_rect() -> RECT {
-    let (left, top) = (scale(WIDTH) + scale(22), head() + scale(PAD) / 2 + scale(10));
-    RECT { left, top, right: left + scale(28), bottom: top + scale(28) }
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(app().hwnd, &mut rc) };
+    let (right, top) = (rc.right - scale(12), rc.bottom - scale(FOOT) - scale(84) - scale(3));
+    RECT { left: right - scale(28), top, right, bottom: top + scale(28) }
 }
 
 fn inside(r: &RECT, x: i32, y: i32) -> bool {
@@ -400,6 +412,9 @@ const PREVIEW_W: i32 = 360;
 const PREVIEW_ROWS: i32 = 7;
 const HEAD: i32 = 60;
 const ROW: i32 = 50;
+const HIST_ROW: i32 = 38;
+/// The empty state's height ("no results").
+const EMPTY_H: i32 = 110;
 const FOOT: i32 = 30;
 const PAD: i32 = 10;
 /// Corners: one radius for boxes, rows and buttons (as a diameter, 96 DPI);
@@ -766,6 +781,17 @@ fn edit_text(edit: HWND) -> String {
     String::from_utf16_lossy(&b[..got])
 }
 
+/// A row's height (96 DPI): past searches are one line, so shorter.
+fn row_h() -> i32 {
+    if app().items.first().is_some_and(|it| it.history) { HIST_ROW } else { ROW }
+}
+
+/// The empty state: something was searched and nothing came back.
+fn nothing_found() -> bool {
+    let a = app();
+    a.items.is_empty() && a.usage.is_none() && !a.query.trim().is_empty()
+}
+
 fn rows_shown() -> usize {
     app().items.len().min(MAX_ROWS)
 }
@@ -786,7 +812,7 @@ fn window_height() -> i32 {
     if previewing() {
         rows = rows.max(PREVIEW_ROWS);
     }
-    let body = if rows > 0 { rows * ROW + PAD } else { 0 };
+    let body = if rows > 0 { rows * row_h() + PAD } else if nothing_found() { EMPTY_H } else { 0 };
     let foot = if a.query.trim().is_empty() && a.items.is_empty() { 0 } else { FOOT };
     head() + scale(body + foot)
 }
@@ -1355,6 +1381,55 @@ fn draw_name(dc: HDC, name: &str, mut r: RECT, query: &str, color: u32, accent: 
     piece(at, ws.len(), color, &mut x);
 }
 
+/// `s`'s width in `font`.
+fn text_w(dc: HDC, font: HFONT, s: &str) -> i32 {
+    let ws: Vec<u16> = s.encode_utf16().collect();
+    let mut sz = SIZE { cx: 0, cy: 0 };
+    unsafe {
+        let old = SelectObject(dc, font);
+        GetTextExtentPoint32W(dc, ws.as_ptr(), ws.len() as i32, &mut sz);
+        SelectObject(dc, old);
+    }
+    sz.cx
+}
+
+/// The footer's keys: each key in a small cap, its action beside it, read
+/// right to left from `right`. Hints that don't fit are left out, last first.
+fn draw_keys(dc: HDC, hints: &[(&str, &str)], left: i32, right: i32, top: i32, bottom: i32, t: &Theme) {
+    let a = app();
+    let (pad, gap, inner) = (scale(6), scale(16), scale(5));
+    let width = |k: &str, l: &str| text_w(dc, a.fonts.ui, l) + if k.is_empty() { 0 } else { text_w(dc, a.fonts.sub, k) + 2 * pad + inner };
+    let mut shown = hints.len();
+    while shown > 0 && hints[..shown].iter().map(|(k, l)| width(k, l) + gap).sum::<i32>() - gap > right - left {
+        shown -= 1;
+    }
+    let mid = (top + bottom) / 2;
+    let mut x = right;
+    for &(k, l) in &hints[..shown] {
+        if !k.is_empty() {
+            let kw = text_w(dc, a.fonts.sub, k) + 2 * pad;
+            let cap = RECT { left: x - kw, top: mid - scale(10), right: x, bottom: mid + scale(10) };
+            round_fill(dc, &cap, t.input, scale(8));
+            round_stroke(dc, &cap, t.border, scale(8));
+            unsafe {
+                SelectObject(dc, a.fonts.sub);
+                SetTextColor(dc, t.text);
+            }
+            let mut kr = cap;
+            draw_text(dc, k, &mut kr, DT_CENTER | DT_VCENTER);
+            x -= kw + inner;
+        }
+        let lw = text_w(dc, a.fonts.ui, l);
+        unsafe {
+            SelectObject(dc, a.fonts.ui);
+            SetTextColor(dc, t.sub);
+        }
+        let mut lr = RECT { left: x - lw, top, right: x, bottom };
+        draw_text(dc, l, &mut lr, DT_RIGHT | DT_VCENTER | DT_RTLREADING);
+        x -= lw + gap;
+    }
+}
+
 fn fill(dc: HDC, r: &RECT, color: u32) {
     unsafe {
         let b = CreateSolidBrush(color);
@@ -1456,7 +1531,7 @@ fn paint() {
         draw_text(dc, "\u{E721}", &mut boxr, DT_CENTER | DT_VCENTER);
         // The preview button: lit while the preview is on.
         let tr = toggle_rect();
-        if a.preview_on {
+        if previewing() {
             round_fill(dc, &tr, t.sel, scale(R));
         } else if a.hover_btn == Some(Btn::Toggle) {
             round_fill(dc, &tr, t.hover, scale(R));
@@ -1481,8 +1556,14 @@ fn paint() {
             for (i, r) in chip_rects().iter().enumerate() {
                 let lit = a.hover_btn == Some(Btn::Chip(i));
                 round_fill(dc, r, if lit { t.sel } else { t.chip }, PILL);
+                // The glyph at the start (right), the label after it.
+                let mut gr = RECT { left: r.right - scale(12 + CHIP_GLYPH), top: r.top, right: r.right - scale(10), bottom: r.bottom };
+                SelectObject(dc, a.fonts.glyph_chip);
+                SetTextColor(dc, if lit { t.accent } else { t.sub });
+                draw_text(dc, CHIPS[i].2, &mut gr, DT_CENTER | DT_VCENTER);
+                SelectObject(dc, a.fonts.ui);
                 SetTextColor(dc, if lit { t.accent } else { t.text });
-                let mut tr = *r;
+                let mut tr = RECT { left: r.left + scale(12), top: r.top, right: r.right - scale(12 + CHIP_GLYPH), bottom: r.bottom };
                 draw_text(dc, CHIPS[i].0, &mut tr, DT_CENTER | DT_VCENTER | DT_RTLREADING);
             }
         }
@@ -1498,10 +1579,11 @@ fn paint() {
         let end = (a.top + MAX_ROWS).min(a.items.len());
         for i in a.top..end {
             let it = &a.items[i];
-            let row = RECT { left: scale(8), top: y, right: lw - scale(8), bottom: y + scale(ROW) };
+            let row = RECT { left: scale(8), top: y, right: lw - scale(8), bottom: y + scale(row_h()) };
             if i == a.sel {
                 round_fill(dc, &row, t.sel, scale(R));
-                let bar = RECT { left: row.left, top: row.top + scale(14), right: row.left + scale(3), bottom: row.bottom - scale(14) };
+                let inset = (row.bottom - row.top) * 3 / 10;
+                let bar = RECT { left: row.left, top: row.top + inset, right: row.left + scale(3), bottom: row.bottom - inset };
                 round_fill(dc, &bar, t.accent, PILL);
             } else if a.hover == Some(i) {
                 round_fill(dc, &row, t.hover, scale(R));
@@ -1512,17 +1594,13 @@ fn paint() {
                 // A past search: a clock, the query, and what Enter does.
                 SelectObject(dc, a.fonts.glyph);
                 SetTextColor(dc, t.sub);
-                let mut gr = RECT { left: scale(22), top: y, right: scale(50), bottom: y + scale(ROW) };
+                let mut gr = RECT { left: scale(22), top: y, right: scale(50), bottom: y + scale(row_h()) };
                 draw_text(dc, "\u{E81C}", &mut gr, DT_CENTER | DT_VCENTER);
                 SelectObject(dc, a.fonts.name);
                 SetTextColor(dc, t.text);
-                let mut r1 = RECT { left, top: y + scale(6), right, bottom: y + scale(27) };
-                draw_text(dc, &it.name, &mut r1, DT_LEFT | DT_END_ELLIPSIS);
-                SelectObject(dc, a.fonts.sub);
-                SetTextColor(dc, t.sub);
-                let mut r2 = RECT { left, top: y + scale(27), right, bottom: y + scale(45) };
-                draw_text(dc, "بحث سابق", &mut r2, DT_LEFT | DT_RTLREADING);
-                y += scale(ROW);
+                let mut r1 = RECT { left, top: y, right, bottom: y + scale(row_h()) };
+                draw_text(dc, &it.name, &mut r1, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+                y += scale(row_h());
                 continue;
             }
             let idx = icon_index(it);
@@ -1530,7 +1608,7 @@ fn paint() {
                 let hi = ImageList_GetIcon(a.images, idx, ILD_NORMAL);
                 if !hi.is_null() {
                     let s = scale(28);
-                    DrawIconEx(dc, scale(22), y + (scale(ROW) - s) / 2, hi, s, s, 0, std::ptr::null_mut(), DI_NORMAL);
+                    DrawIconEx(dc, scale(22), y + (scale(row_h()) - s) / 2, hi, s, s, 0, std::ptr::null_mut(), DI_NORMAL);
                     DestroyIcon(hi);
                 }
             }
@@ -1584,10 +1662,33 @@ fn paint() {
             } else {
                 draw_text(dc, &it.dir, &mut r2, DT_LEFT | DT_PATH_ELLIPSIS);
             }
-            y += scale(ROW);
+            y += scale(row_h());
         }
 
-        // Footer: count and keys, read right to left.
+        // A thin scroll mark at the list's edge, when there is more than shows.
+        let n = a.items.len();
+        if n > MAX_ROWS {
+            let track = (MAX_ROWS as i32) * scale(row_h());
+            let th = (track * MAX_ROWS as i32 / n as i32).max(scale(24));
+            let ty = list_top + ((track - th) as i64 * a.top as i64 / (n - MAX_ROWS) as i64) as i32;
+            round_fill(dc, &RECT { left: lw - scale(5), top: ty, right: lw - scale(2), bottom: ty + th }, t.border, PILL);
+        }
+
+        // Nothing found: say so in the middle, under a large search glyph.
+        if nothing_found() {
+            let top = head + scale(14);
+            SelectObject(dc, a.fonts.glyph_large);
+            SetTextColor(dc, t.border);
+            let mut gr = RECT { left: 0, top, right: cw, bottom: top + scale(44) };
+            draw_text(dc, "\u{E721}", &mut gr, DT_CENTER | DT_VCENTER);
+            SelectObject(dc, a.fonts.ui);
+            SetTextColor(dc, t.sub);
+            let msg = if a.status.starts_with(&results_ar(0)) { results_ar(0) } else { a.status.clone() };
+            let mut mr = RECT { left: scale(24), top: top + scale(50), right: cw - scale(24), bottom: top + scale(74) };
+            draw_text(dc, &msg, &mut mr, DT_CENTER | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
+        }
+
+        // Footer: the count at the right; the keys, each in a small cap, at the left.
         let fy = ch - scale(FOOT);
         let has_foot = !(a.query.trim().is_empty() && a.items.is_empty());
         if has_foot {
@@ -1596,19 +1697,19 @@ fn paint() {
             SetTextColor(dc, t.sub);
             let mut fr = RECT { left: scale(16), top: fy, right: cw - scale(16), bottom: ch };
             draw_text(dc, &a.status, &mut fr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
-            let hints = if a.usage.is_some() {
-                "Enter فتح المجلد   ·   Backspace للأعلى   ·   Delete حذف   ·   Esc رجوع للبحث"
+            let hints: &[(&str, &str)] = if a.usage.is_some() {
+                &[("Enter", "فتح المجلد"), ("Backspace", "للأعلى"), ("Delete", "حذف"), ("Esc", "رجوع للبحث")]
             } else if a.items.get(a.sel).is_some_and(|it| it.program.is_some()) {
-                "Delete إزالة البرنامج   ·   Enter مجلد التثبيت"
+                &[("Delete", "إزالة البرنامج"), ("Enter", "مجلد التثبيت")]
             } else if a.items.get(a.sel).is_some_and(|it| it.history) {
-                "Enter للبحث   ·   Delete للحذف من السجل"
+                &[("Enter", "للبحث"), ("Delete", "للحذف من السجل")]
             } else if !a.items.is_empty() {
-                "Enter فتح   ·   Ctrl+Enter المجلد   ·   Ctrl+P المعاينة   ·   Delete حذف   ·   اسحب الملف إلى أي برنامج"
+                &[("Enter", "فتح"), ("Ctrl+Enter", "المجلد"), ("Ctrl+P", "المعاينة"), ("Delete", "حذف"), ("", "اسحب الملف إلى أي برنامج")]
             } else {
-                ""
+                &[]
             };
-            let mut kr = RECT { left: scale(16), top: fy, right: cw - scale(200), bottom: ch };
-            draw_text(dc, hints, &mut kr, DT_LEFT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
+            let status_w = text_w(dc, a.fonts.ui, &a.status);
+            draw_keys(dc, hints, scale(16), cw - scale(16) - status_w - scale(24), fy, ch, &t);
         }
 
         // The preview pane.
@@ -1643,7 +1744,7 @@ fn paint() {
             let mut iy = bottom - info_h;
             SelectObject(dc, a.fonts.name);
             SetTextColor(dc, t.text);
-            let mut nr = RECT { left: px, top: iy, right: pr, bottom: iy + scale(22) };
+            let mut nr = RECT { left: px, top: iy, right: pr - scale(34), bottom: iy + scale(22) };
             draw_text(dc, &it.name, &mut nr, DT_LEFT | DT_END_ELLIPSIS);
             iy += scale(24);
             SelectObject(dc, a.fonts.sub);
@@ -1709,7 +1810,7 @@ fn row_at(x: i32, y: i32) -> Option<usize> {
     if y < top {
         return None;
     }
-    let i = a.top + ((y - top) / scale(ROW)) as usize;
+    let i = a.top + ((y - top) / scale(row_h())) as usize;
     (i < a.items.len() && i < a.top + MAX_ROWS).then_some(i)
 }
 
@@ -2183,7 +2284,7 @@ fn context_menu(i: usize, at: Option<POINT>) {
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
     let pt = at.unwrap_or_else(|| {
         let row = (i.saturating_sub(a.top)) as i32;
-        let mut p = POINT { x: scale(62), y: head() + scale(PAD) / 2 + (row + 1) * scale(ROW) - scale(8) };
+        let mut p = POINT { x: scale(62), y: head() + scale(PAD) / 2 + (row + 1) * scale(row_h()) - scale(8) };
         unsafe { ClientToScreen(a.hwnd, &mut p) };
         p
     });
