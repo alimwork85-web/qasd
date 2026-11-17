@@ -214,7 +214,7 @@ struct App {
     preview_on: bool,
     /// What it shows now, and where previews are asked for.
     preview: Option<Preview>,
-    previews: Sender<(u64, String, bool, i32, Option<u64>)>,
+    previews: Sender<(u64, String, bool, i32)>,
     preview_seq: u64,
     /// The button under the mouse: the preview toggle or its close.
     hover_btn: Option<Btn>,
@@ -492,12 +492,8 @@ struct Preview {
     path: String,
     /// A thumbnail or big icon (32-bit, premultiplied alpha), or null.
     bitmap: HBITMAP,
-    /// A text file's first lines, or (a grep hit) the lines around its line.
+    /// A text file's first lines.
     text: Option<Vec<String>>,
-    /// The grep hit's line this preview is around (1-based), if any, and
-    /// its row in `text`, marked.
-    line: Option<u64>,
-    mark: Option<usize>,
     /// "Text Document", "JPEG image"...: Explorer's type name.
     kind: String,
 }
@@ -514,10 +510,10 @@ const TEXT_EXTS: &[&str] = &[
 ];
 
 /// Make the preview of `path` (a Windows path) at about `px` pixels wide.
-fn make_preview(seq: u64, path: &str, is_dir: bool, px: i32, line: Option<u64>) -> Preview {
+fn make_preview(seq: u64, path: &str, is_dir: bool, px: i32) -> Preview {
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY};
-    let mut p = Preview { seq, path: path.to_string(), bitmap: std::ptr::null_mut(), text: None, line, mark: None, kind: String::new() };
+    let mut p = Preview { seq, path: path.to_string(), bitmap: std::ptr::null_mut(), text: None, kind: String::new() };
     let wpath = w(path);
     // Explorer's type name.
     let mut fi: SHFILEINFOW = unsafe { std::mem::zeroed() };
@@ -530,9 +526,8 @@ fn make_preview(seq: u64, path: &str, is_dir: bool, px: i32, line: Option<u64>) 
     let online_only = attrs != u32::MAX && attrs & (0x0040_0000 | 0x0000_1000) != 0;
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
     if !is_dir && !online_only && TEXT_EXTS.contains(&ext.as_str()) {
-        if let Some((text, mark)) = read_text(path, line) {
-            p.text = Some(text);
-            p.mark = mark;
+        p.text = read_text(path);
+        if p.text.is_some() {
             return p;
         }
     }
@@ -552,20 +547,14 @@ fn make_preview(seq: u64, path: &str, is_dir: bool, px: i32, line: Option<u64>) 
     p
 }
 
-/// Lines shown above a grep hit's line in the preview.
-const ABOVE: usize = 6;
-
 /// The first lines of a text file (UTF-8, or UTF-16 with its mark), if it
-/// reads as text; with `line` (a grep hit's, 1-based), the lines from a
-/// few above it, and its row among them. Opened without recalling cloud
-/// files.
-fn read_text(path: &str, line: Option<u64>) -> Option<(Vec<String>, Option<usize>)> {
+/// reads as text. Opened without recalling cloud files.
+fn read_text(path: &str) -> Option<Vec<String>> {
     use std::io::Read;
-    let f = qasd::content::open_regular(&sys::from_user(path))?;
-    // A hit's line may be far in: read as far as content search does.
-    let cap = if line.is_some_and(|l| l > 40) { qasd::content::MAX_REPO_FILE } else { 16 * 1024 };
-    let mut buf = Vec::new();
-    f.take(cap).read_to_end(&mut buf).ok()?;
+    let mut f = qasd::content::open_regular(&sys::from_user(path))?;
+    let mut buf = vec![0u8; 16 * 1024];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
     let text = if buf.starts_with(&[0xFF, 0xFE]) {
         let w: Vec<u16> = buf[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         String::from_utf16_lossy(&w)
@@ -575,21 +564,18 @@ fn read_text(path: &str, line: Option<u64>) -> Option<(Vec<String>, Option<usize
         }
         String::from_utf8_lossy(buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf)).into_owned()
     };
-    let from = line.map_or(0, |l| (l as usize).saturating_sub(1 + ABOVE));
-    let lines: Vec<String> = text.lines().skip(from).take(80).map(|l| l.replace('\t', "    ").chars().take(240).collect()).collect();
-    let mark = line.map(|l| (l as usize).saturating_sub(1 + from)).filter(|&m| m < lines.len());
-    Some((lines, mark))
+    Some(text.lines().take(80).map(|l| l.replace('\t', "    ").chars().take(240).collect()).collect())
 }
 
-fn preview_thread(rx: Receiver<(u64, String, bool, i32, Option<u64>)>, hwnd: usize) {
+fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
     // Thumbnail providers are COM objects.
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
-    while let Ok((seq, path, is_dir, px, line)) = rx.recv() {
+    while let Ok((seq, path, is_dir, px)) = rx.recv() {
         // Arrow keys held down: only the last one matters.
         if seq < LATEST_PREVIEW.load(Ordering::Relaxed) {
             continue;
         }
-        let p = Box::into_raw(Box::new(make_preview(seq, &path, is_dir, px, line)));
+        let p = Box::into_raw(Box::new(make_preview(seq, &path, is_dir, px)));
         if unsafe { PostMessageW(hwnd as HWND, WM_PREVIEW, 0, p as isize) } == 0 {
             let p = unsafe { Box::from_raw(p) };
             if !p.bitmap.is_null() {
@@ -671,13 +657,12 @@ fn request_preview() {
         return;
     }
     let it = &a.items[a.sel];
-    let line = it.line.as_ref().map(|l| l.0);
-    if a.preview.as_ref().is_some_and(|p| p.path == it.path && p.line == line) {
+    if a.preview.as_ref().is_some_and(|p| p.path == it.path) {
         return;
     }
     a.preview_seq += 1;
     LATEST_PREVIEW.store(a.preview_seq, Ordering::Relaxed);
-    let _ = a.previews.send((a.preview_seq, it.path.clone(), it.is_dir, scale(PREVIEW_W - 40), line));
+    let _ = a.previews.send((a.preview_seq, it.path.clone(), it.is_dir, scale(PREVIEW_W - 40)));
 }
 
 fn on_preview(p: Box<Preview>) {
@@ -1274,19 +1259,15 @@ fn paint() {
             let area = RECT { left: px, top: list_top + scale(4), right: pr, bottom: bottom - info_h - scale(8) };
             let shown = a.preview.as_ref().filter(|p| p.path == it.path);
             match shown {
-                Some(Preview { text: Some(lines), mark, .. }) => {
+                Some(Preview { text: Some(lines), .. }) => {
                     round_fill(dc, &area, t.input, scale(10));
                     SelectObject(dc, a.fonts.mono);
                     SetTextColor(dc, t.text);
                     let lh = scale(16);
                     let mut ly = area.top + scale(8);
-                    for (n, l) in lines.iter().enumerate() {
+                    for l in lines {
                         if ly + lh > area.bottom - scale(6) {
                             break;
-                        }
-                        // The grep hit's line.
-                        if *mark == Some(n) {
-                            fill(dc, &RECT { left: area.left + scale(4), top: ly, right: area.right - scale(4), bottom: ly + lh }, t.sel);
                         }
                         let mut lr = RECT { left: area.left + scale(10), top: ly, right: area.right - scale(8), bottom: ly + lh };
                         draw_text(dc, l, &mut lr, DT_LEFT | DT_END_ELLIPSIS | DT_EXPANDTABS);
