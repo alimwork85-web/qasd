@@ -419,7 +419,7 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
         match job {
             Job::Warm => {
                 let _ = ask(&json!({"op": "status"}));
-                apps = list_apps();
+                apps = qasd::apps::list();
                 apps_at = Some(Instant::now());
             }
             Job::Opened(p) => {
@@ -468,7 +468,7 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
                 } else if !q.trim().is_empty() {
                     // shortcut: re-listed at most once a minute; an app installed just now shows within a minute.
                     if apps_at.is_none_or(|t: Instant| t.elapsed() > Duration::from_secs(60)) {
-                        apps = list_apps();
+                        apps = qasd::apps::list();
                         apps_at = Some(Instant::now());
                     }
                     match ask(&json!({"q": q, "limit": LIMIT, "boost": true, "cwd": sys::home()})) {
@@ -503,39 +503,6 @@ fn item(path: &str, is_dir: bool) -> Item {
     Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0, app: false, cache, program: None }
 }
 
-/// The Start menu's apps (Store and desktop alike), as (name, id): what
-/// `shell:AppsFolder` lists, in the language Windows shows.
-fn list_apps() -> Vec<(String, String)> {
-    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
-    use windows::Win32::UI::Shell::{BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING};
-    let name = |it: &IShellItem, k: SIGDN| unsafe {
-        let p = it.GetDisplayName(k).ok()?;
-        let s = p.to_string().ok();
-        CoTaskMemFree(Some(p.0 as _));
-        s
-    };
-    let mut out = Vec::new();
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let Ok(folder) = SHGetKnownFolderItem::<_, IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None) else { return out };
-        let Ok(list) = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else { return out };
-        loop {
-            let mut one = [None];
-            let mut n = 0;
-            if list.Next(&mut one, Some(&mut n)).is_err() || n == 0 {
-                break;
-            }
-            let Some(it) = one[0].take() else { break };
-            if let (Some(shown), Some(id)) = (name(&it, SIGDN_NORMALDISPLAY), name(&it, SIGDN_PARENTRELATIVEPARSING)) {
-                // Some names carry direction marks ("\u{200e}الرسام").
-                let shown: String = shown.chars().filter(|c| !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}')).collect();
-                out.push((shown.trim().to_string(), id));
-            }
-        }
-    }
-    out
-}
-
 /// `app: words`: the installed programs (the words narrow them).
 fn programs_query(q: &str) -> Option<&str> {
     let t = q.trim_start();
@@ -545,7 +512,7 @@ fn programs_query(q: &str) -> Option<&str> {
 /// The installed programs `q` finds (all of them for no words), best first.
 fn program_items(progs: &[qasd::programs::Program], q: &str) -> Vec<Item> {
     let names: Vec<&str> = progs.iter().map(|p| p.name.as_str()).collect();
-    let order: Vec<usize> = if q.is_empty() { (0..progs.len()).collect() } else { rank_names(&names, q) };
+    let order: Vec<usize> = if q.is_empty() { (0..progs.len()).collect() } else { qasd::apps::rank(&names, q) };
     order
         .into_iter()
         .map(|i| {
@@ -557,49 +524,11 @@ fn program_items(progs: &[qasd::programs::Program], q: &str) -> Vec<Item> {
         .collect()
 }
 
-/// Indexes of the names `q` finds, best first: the words as typed, their
-/// other Arabic spellings (ة/ه, أ/ا...) and the other keyboard layout.
-fn rank_names(names: &[&str], q: &str) -> Vec<usize> {
-    let Ok(query) = qasd::Query::parse(q, &sys::home()) else { return Vec::new() };
-    let mut forms = vec![query.tokens.clone()];
-    forms.extend(query.alt.iter().cloned());
-    if !query.layout.is_empty() {
-        forms.push(query.layout.clone());
-    }
-    let forms: Vec<qasd::Query> = forms.into_iter().map(|tokens| qasd::Query { tokens, alt: Vec::new(), layout: Vec::new(), ..query.clone() }).collect();
-    let mut hits: Vec<(i32, usize)> = names
-        .iter()
-        .enumerate()
-        .filter_map(|(i, n)| {
-            let p = format!("/{n}");
-            forms.iter().filter_map(|f| f.match_path(p.as_bytes(), qasd::walk::KIND_FILE, 0, 0)).max().map(|s| (s, i))
-        })
-        .collect();
-    hits.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| names[x.1].len().cmp(&names[y.1].len())));
-    hits.into_iter().map(|(_, i)| i).collect()
-}
-
 /// The apps whose names `q` finds, best first (at most 4).
-fn app_items(apps: &[(String, String)], q: &str) -> Vec<Item> {
-    let Ok(query) = qasd::Query::parse(q, &sys::home()) else { return Vec::new() };
-    // The words as typed, their other Arabic spellings (ة/ه, أ/ا...) and the other keyboard layout.
-    let mut forms = vec![query.tokens.clone()];
-    forms.extend(query.alt.iter().cloned());
-    if !query.layout.is_empty() {
-        forms.push(query.layout.clone());
-    }
-    let forms: Vec<qasd::Query> = forms.into_iter().map(|tokens| qasd::Query { tokens, alt: Vec::new(), layout: Vec::new(), ..query.clone() }).collect();
-    let mut hits: Vec<(i32, &(String, String))> = apps
-        .iter()
-        .filter_map(|a| {
-            let p = format!("/{}", a.0);
-            forms.iter().filter_map(|f| f.match_path(p.as_bytes(), qasd::walk::KIND_FILE, 0, 0)).max().map(|s| (s, a))
-        })
-        .collect();
-    hits.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.0.len().cmp(&y.1.0.len())));
-    hits.into_iter()
-        .take(4)
-        .map(|(_, (name, id))| Item { path: format!("shell:AppsFolder\\{id}"), name: name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true, cache: false, program: None })
+fn app_items(apps: &[qasd::apps::App], q: &str) -> Vec<Item> {
+    qasd::apps::find(apps, q, 4)
+        .into_iter()
+        .map(|x| Item { path: x.target(), name: x.name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true, cache: false, program: None })
         .collect()
 }
 

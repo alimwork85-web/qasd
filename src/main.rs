@@ -20,6 +20,8 @@ usage:
   qasd stdio                 JSON lines on stdin/stdout
   qasd mcp                   MCP server on stdin/stdout, for coding agents
   qasd serve                 run the daemon in the foreground
+  qasd apps <words> [--json] find installed apps (Start menu) by name; open one with
+                             explorer \"shell:AppsFolder\\<id>\"
   qasd status
   qasd stop                  stop the daemon (keeps the index)
   qasd install [--login]     copy qasd and the search window to %LOCALAPPDATA%\\Qasd\\bin,
@@ -63,6 +65,7 @@ fn main() {
             Err(e) => die(&e),
         },
         Some("bench") => bench(&args[1..].join(" ")),
+        Some("apps") => apps(&args[1..]),
         Some("install") => install(args.iter().any(|a| a == "--login")),
         Some("uninstall") => uninstall(args.iter().any(|a| a == "--purge")),
         Some(_) => {
@@ -73,6 +76,23 @@ fn main() {
             print_one(&serde_json::json!({"q": q.join(" "), "cwd": cwd}), json);
         }
     }
+}
+
+/// `qasd apps <words>`: the Start menu's apps the words find (all, for none).
+fn apps(args: &[String]) {
+    let json = args.iter().any(|a| a == "--json");
+    let q = args.iter().filter(|a| *a != "--json").cloned().collect::<Vec<_>>().join(" ");
+    let all = qasd::apps::list();
+    let found: Vec<&qasd::apps::App> = if q.trim().is_empty() { all.iter().collect() } else { qasd::apps::find(&all, &q, 20) };
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for a in found {
+        let _ = if json {
+            writeln!(out, "{}", serde_json::json!({"name": a.name, "id": a.id, "open": a.target()}))
+        } else {
+            writeln!(out, "{}	{}", a.name, a.target())
+        };
+    }
+    let _ = out.flush();
 }
 
 fn print_one(req: &serde_json::Value, raw: bool) {

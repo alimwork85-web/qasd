@@ -132,6 +132,7 @@ impl Session {
                 self.asks.set(0);
                 let r = match params["name"].as_str().unwrap_or("") {
                     "find_files" => self.find_files(args),
+                    "find_apps" => find_apps(args),
                     other => return Some(error(id, -32602, &format!("unknown tool {other}"))),
                 };
                 let (text, is_error) = match r {
@@ -404,7 +405,29 @@ fn tools() -> Value {
             })), "required": ["query"]},
             "annotations": ro,
         },
+        {
+            "name": "find_apps",
+            "description": "Find installed apps (the Windows Start menu's, Store and desktop) by name, fuzzy and typo-tolerant. Each result gives a target that opens the app: explorer.exe \"shell:AppsFolder\\<id>\". An empty query lists them all.",
+            "inputSchema": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Name words, e.g. 'calculator' or 'الحاسبة'."},
+                "maxResults": {"type": "number", "description": "Default 10."},
+            }, "required": ["query"]},
+            "annotations": ro,
+        },
     ])
+}
+
+/// The `find_apps` tool: one line per app, `name<TAB>shell:AppsFolder\<id>`.
+fn find_apps(a: &Value) -> Result<String, String> {
+    let q = arg_str(a, &["query"]).unwrap_or_default();
+    let max = arg_num(a, "maxResults", 10);
+    let all = qasd::apps::list();
+    let found: Vec<&qasd::apps::App> = if q.trim().is_empty() { all.iter().take(max).collect() } else { qasd::apps::find(&all, &q, max) };
+    if found.is_empty() {
+        return Ok(format!("no app matches '{q}'"));
+    }
+    Ok(found.iter().map(|x| format!("{}	{}", x.name, x.target())).collect::<Vec<_>>().join("
+"))
 }
 
 /// The first of `keys` given as a string.

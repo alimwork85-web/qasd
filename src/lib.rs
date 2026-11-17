@@ -5,6 +5,7 @@
 //! A Windows port of fsearch (github.com/noahdunnagan/fsearch, MIT).
 
 pub mod alloc;
+pub mod apps;
 pub mod clean;
 pub mod dupes;
 mod engine;
