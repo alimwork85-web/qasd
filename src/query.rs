@@ -400,6 +400,10 @@ pub struct Query {
     /// if that differs (see `other_form`), and Arabic letter variants (see
     /// `arabic_forms`). `Searcher::search` looks for those too.
     pub alt: Vec<Vec<Token>>,
+    /// The words as typed with the other keyboard layout (Arabic or
+    /// English, see `other_layout`): searched only when the words as typed
+    /// find nothing well.
+    pub layout: Vec<Token>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -449,6 +453,14 @@ impl Query {
                     q.alt.push(oq.tokens);
                 }
             }
+        }
+        // "قثشيةث" typed for "readme" with the Arabic layout on, or the
+        // other way round.
+        if let Some(o) = other_layout(s)
+            && let Ok(oq) = Query::parse_form(&o, home)
+            && oq.tokens.len() == q.tokens.len()
+        {
+            q.layout = oq.tokens;
         }
         Ok(q)
     }
@@ -1000,6 +1012,48 @@ fn other_form(s: &str) -> Option<String> {
 fn normalized(s: &str, form: isize) -> Option<String> {
     use unicode_normalization::UnicodeNormalization;
     Some(if form == 0 { s.nfd().collect() } else { s.nfc().collect() })
+}
+
+/// The Arabic (101) keyboard's letters on the US layout's keys, unshifted.
+/// shortcut: لا (the B key) and shifted keys are left out; add them if
+/// people miss them.
+#[rustfmt::skip]
+const LAYOUT: &[(char, char)] = &[
+    ('q', 'ض'), ('w', 'ص'), ('e', 'ث'), ('r', 'ق'), ('t', 'ف'), ('y', 'غ'), ('u', 'ع'), ('i', 'ه'), ('o', 'خ'), ('p', 'ح'), ('[', 'ج'), (']', 'د'),
+    ('a', 'ش'), ('s', 'س'), ('d', 'ي'), ('f', 'ب'), ('g', 'ل'), ('h', 'ا'), ('j', 'ت'), ('k', 'ن'), ('l', 'م'), (';', 'ك'), ('\'', 'ط'),
+    ('z', 'ئ'), ('x', 'ء'), ('c', 'ؤ'), ('v', 'ر'), ('n', 'ى'), ('m', 'ة'), (',', 'و'), ('.', 'ز'), ('/', 'ظ'), ('`', 'ذ'),
+];
+
+/// `s` as the same keys give with the other layout on: Arabic letters
+/// typed for an English word ("قثشيةث" for readme), or English letters
+/// for an Arabic one ("hsglm" for اسلام). Filters stay as typed. None
+/// unless some word is all one layout's letters and the result differs.
+fn other_layout(s: &str) -> Option<String> {
+    let flip = |c: char| {
+        LAYOUT.iter().find_map(|&(l, a)| {
+            if c.to_ascii_lowercase() == l {
+                Some(a)
+            } else if c == a {
+                Some(l)
+            } else {
+                None
+            }
+        })
+    };
+    let mut changed = false;
+    let words: Vec<String> = split_words(s)
+        .into_iter()
+        .map(|w| {
+            let letters = |arabic: bool| w.chars().all(|c| LAYOUT.iter().any(|&(l, a)| if arabic { c == a } else { c.to_ascii_lowercase() == l }));
+            // A word of Latin letters must have one to be a typo'd Arabic word.
+            if w.contains(':') || !(letters(true) || (letters(false) && w.chars().any(|c| c.is_ascii_alphabetic()))) {
+                return w;
+            }
+            changed = true;
+            w.chars().map(|c| flip(c).unwrap_or(c)).collect()
+        })
+        .collect();
+    changed.then(|| words.join(" "))
 }
 
 /// The most other Arabic spellings of one query `Query::parse` searches:
@@ -2086,7 +2140,7 @@ impl Searcher<'_> {
     /// has well (as typed, or with typos keeping the first letter) is
     /// likely misspelled worse: then the search runs again, deep.
     /// Words in other spellings (`Query::alt`) are looked for in each.
-    pub fn search(&self, q: &Query) -> Vec<Hit> {
+    fn search_spellings(&self, q: &Query) -> Vec<Hit> {
         if q.alt.is_empty() {
             return self.search_form(q);
         }
@@ -2094,8 +2148,25 @@ impl Searcher<'_> {
         // Without a deep typo search of their own: a form the disk may not
         // hold at all would run one every time.
         for alt in &q.alt {
-            hits.extend(self.search_once(&Query { tokens: alt.clone(), alt: Vec::new(), ..q.clone() }));
+            hits.extend(self.search_once(&Query { tokens: alt.clone(), alt: Vec::new(), layout: Vec::new(), ..q.clone() }));
         }
+        self.merge_hits(q, hits)
+    }
+
+    /// `search_spellings`, then the words in the other keyboard layout
+    /// (`Query::layout`) when those as typed find nothing well.
+    pub fn search(&self, q: &Query) -> Vec<Hit> {
+        let hits = self.search_spellings(q);
+        if q.layout.is_empty() || (!hits.is_empty() && self.well_found(q, &hits)) {
+            return hits;
+        }
+        let mut hits = hits;
+        hits.extend(self.search_once(&Query { tokens: q.layout.clone(), alt: Vec::new(), layout: Vec::new(), ..q.clone() }));
+        self.merge_hits(q, hits)
+    }
+
+    /// Hits of several searches, each entry once at its best, the top `q.limit`.
+    fn merge_hits(&self, q: &Query, mut hits: Vec<Hit>) -> Vec<Hit> {
         // An entry both find, once, at its best.
         hits.sort_by_cached_key(|h| std::cmp::Reverse(self.sort_key(h)));
         let mut seen = std::collections::HashSet::new();
@@ -4133,6 +4204,30 @@ mod tests {
         has("مستشفي", "مستشفى.md");
         has("أُسَامَة", "أسامة.pdf");
         assert!(found("اسامه").iter().all(|p| !p.ends_with("zzz.txt")));
+    }
+
+    /// A word typed with the wrong keyboard layout on finds what was meant.
+    #[test]
+    fn other_keyboard_layout() {
+        assert_eq!(other_layout("قثشيةث").as_deref(), Some("readme"));
+        assert_eq!(other_layout("hsglm").as_deref(), Some("اسلمة"));
+        assert_eq!(other_layout("in:~\\x قثشيةث").as_deref(), Some("in:~\\x readme"));
+        assert_eq!(other_layout("12 34"), None);
+        let names = ["readme.md", "سلام.txt", "zzz.txt"];
+        let (mut buf, mut ents) = (Vec::new(), Vec::new());
+        for n in names {
+            ents.push(RawEnt { name_off: buf.len() as u32, name_len: n.len() as u16, kind: KIND_FILE, size: 1, mtime: 1, child: NONE });
+            buf.extend_from_slice(n.as_bytes());
+        }
+        let l = Live::new(Index::build(vec![Listing { id: 0, names: buf, ents }], 0, 0, b"/h"));
+        let first = |q: &str| {
+            let mut p = Vec::new();
+            let h = Searcher { live: &l }.search(&Query::parse(q, "/h").unwrap());
+            h.first().map(|h| (l.base.path(h.idx as usize, &mut p), String::from_utf8_lossy(&p).into_owned()).1).unwrap_or_default()
+        };
+        assert!(first("قثشيةث").ends_with("readme.md"));
+        assert!(first("sghl").ends_with("سلام.txt"));
+        assert!(first("readme").ends_with("readme.md"));
     }
 
     /// Filters keep their Arabic as typed; the forms are capped.
