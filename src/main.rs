@@ -222,6 +222,8 @@ const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 /// The Installed apps entry (Settings > Apps, Programs and Features).
 const APP_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Qasd";
 const PUBLISHER: &str = "Ali Alhumedi";
+/// The shortcuts' name (desktop and Start menu).
+const SHORTCUT: &str = "Qasd";
 
 /// Take `dir` off the user's PATH.
 fn remove_from_path(dir: &str) -> bool {
@@ -372,7 +374,25 @@ fn install(login: bool) {
         println!("search window: press Alt+Q (starts with Windows; tray icon to quit)");
     }
     register_app(&bin, &win);
+    if has_window {
+        shortcuts(Some(&win));
+        println!("shortcuts: on the desktop and in the Start menu");
+    }
     println!("listed in Installed apps (publisher: {PUBLISHER})\n{agents}");
+}
+
+/// The search window's shortcuts, on the desktop and in the Start menu
+/// (`None`: remove them).
+fn shortcuts(win: Option<&std::path::Path>) {
+    // Through PowerShell's WScript.Shell: no COM code here for two links.
+    let script = match win {
+        Some(w) => format!(
+            "$s = New-Object -ComObject WScript.Shell; foreach ($d in [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')) {{ $l = $s.CreateShortcut((Join-Path $d '{SHORTCUT}.lnk')); $l.TargetPath = '{w}'; $l.Arguments = '--show'; $l.IconLocation = '{w},0'; $l.Description = 'Qasd - {PUBLISHER}'; $l.Save() }}",
+            w = w.display()
+        ),
+        None => format!("foreach ($d in [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')) {{ Remove-Item -LiteralPath (Join-Path $d '{SHORTCUT}.lnk') -ErrorAction SilentlyContinue }}"),
+    };
+    run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]);
 }
 
 /// Undo `install`. `purge` (from Installed apps): everything, the program
@@ -394,6 +414,7 @@ fn uninstall(purge: bool) {
         return;
     }
     run_quiet("reg", &["delete", APP_KEY, "/f"]);
+    shortcuts(None);
     remove_from_path(&bin_dir().display().to_string());
     // This program is one of the files to delete: a detached cmd does it
     // once we have exited.

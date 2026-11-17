@@ -4,7 +4,7 @@ Qasd — by **Ali Alhumedi**. Built on [fsearch](https://github.com/noahdunnagan
 
 ---
 
-## Unreleased — 2026-11-16
+## v0.8.0 — 2026-11-16
 
 ### بالعربية
 
