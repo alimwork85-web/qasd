@@ -32,7 +32,7 @@ fn snap(dir: &Path, home: &str) {
     let t = Instant::now();
     let ls = qasd::walk::scan(b"/", 8);
     let idx = Index::build(ls, 0, qasd::query::now_secs(), home.as_bytes());
-    std::fs::create_dir_all(dir.join("content")).unwrap();
+    std::fs::create_dir_all(dir).unwrap();
     idx.save(&dir.join("index.bin")).unwrap();
     eprintln!("{} entries, {} names, {:.1} s", idx.n, idx.u, t.elapsed().as_secs_f64());
 }

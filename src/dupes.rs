@@ -3,9 +3,9 @@
 //! 64 KiB, then, for those still alike, the whole file. Hashes are kept per
 //! (path, size, mtime), so the next keystroke in the window reads nothing.
 
-use crate::content::open_regular;
 use crate::live::Live;
 use crate::query::{Query, Searcher};
+use crate::sys::open_regular;
 use crate::walk::KIND_FILE;
 use rayon::prelude::*;
 use std::collections::HashMap;

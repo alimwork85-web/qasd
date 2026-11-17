@@ -288,3 +288,20 @@ mod tests {
         assert_eq!(from_user("/C:/x/"), b"/C:/x");
     }
 }
+
+/// Open a path for reading only if it is a regular file: never recalls a
+/// cloud placeholder (OneDrive) just to read it, never opens through a
+/// link, and lets others write and delete meanwhile.
+pub fn open_regular(path: &[u8]) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_NO_RECALL: u32 = 0x0010_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .custom_flags(FILE_FLAG_OPEN_NO_RECALL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN)
+        .open(os(path))
+        .ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
+}

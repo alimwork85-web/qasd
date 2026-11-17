@@ -392,10 +392,6 @@ pub struct Query {
     pub name_re: Option<regex::bytes::Regex>,
     pub path_re: Option<regex::bytes::Regex>,
     pub limit: usize,
-    /// Content search: handled by the content layer, carried here so one
-    /// query string can say everything.
-    pub grep: Option<String>,
-    pub grep_mode: GrepMode,
     /// The words in other spellings: the other Unicode normalization form,
     /// if that differs (see `other_form`), and Arabic letter variants (see
     /// `arabic_forms`). `Searcher::search` looks for those too.
@@ -406,14 +402,6 @@ pub struct Query {
     pub layout: Vec<Token>,
     /// `dupe:`: only files with a copy elsewhere (see `dupes`).
     pub dupes: bool,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-pub enum GrepMode {
-    #[default]
-    Literal,
-    Regex,
-    Symbol,
 }
 
 pub struct Hit {
@@ -439,7 +427,7 @@ impl Query {
     /// `'x` exact, `^x` prefix, `x$` suffix, `!x` negate; globs (`*.rs`,
     /// `src/**/*.{c,h}`) and folders (`test/`), each negated by `!`;
     /// filters are `ext: type: kind: in: size: mtime: re: path: limit:
-    /// grep: regex: sym:`.
+    /// dupe:`.
     pub fn parse(s: &str, home: &str) -> Result<Query, String> {
         let mut q = Query::parse_form(s, home)?;
         // An accented word may be stored composed (as keyboards type it) or
@@ -630,17 +618,9 @@ impl Query {
             "path" => self.path_re = Some(regex::bytes::Regex::new(&format!("(?i){v}")).map_err(|e| e.to_string())?),
             "dupe" | "dupes" => self.dupes = true,
             "limit" => self.limit = v.parse().map_err(|_| "bad limit")?,
-            "grep" | "content" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Literal),
-            "regex" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Regex),
-            "sym" | "symbol" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Symbol),
             _ => return Ok(false),
         }
         Ok(true)
-    }
-
-    /// The parts of a query that pick files for a content scan.
-    pub fn clone_for_scan(&self) -> Query {
-        Query { grep: None, ..self.clone() }
     }
 
     #[inline(always)]
@@ -653,7 +633,7 @@ impl Query {
     }
 
     /// Does a full path pass every filter and token? Returns the match score.
-    /// Used where there is no dir memo: the overlay and content-search docs.
+    /// Used where there is no dir memo: the overlay.
     pub fn match_path(&self, path: &[u8], kind: u8, size: u64, mtime: u32) -> Option<i32> {
         self.match_path_with(path, kind, size, mtime, |dirs| self.dir_match(dirs))
     }
@@ -1066,7 +1046,7 @@ const ARABIC_FORMS: usize = 8;
 /// `s` with its Arabic words in the spellings names often use instead:
 /// diacritics and tatweel dropped, the first alef as ا, أ or إ (the one
 /// after a leading ال, as in الأحمد), a final ة or ه, a final ى or ي.
-/// Filters (`in:`, `grep:`) stay as typed. At most `ARABIC_FORMS`, `s`
+/// Filters (`in:`, `ext:`) stay as typed. At most `ARABIC_FORMS`, `s`
 /// itself left out; one more letter off is left to typo matching.
 fn arabic_forms(s: &str) -> Vec<String> {
     let quote = |w: String| if w.contains(' ') { format!("\"{w}\"") } else { w };
@@ -2219,7 +2199,7 @@ impl Searcher<'_> {
     fn search_once(&self, q: &Query) -> Vec<Hit> {
         let mut hits = self.search_base(q);
         hits.extend(self.search_overlay(q));
-        // Each hit's key once: a scan for grep lists up to 200k hits.
+        // Each hit's key once: `dupe:` lists up to 400k hits.
         hits.sort_by_cached_key(|h| std::cmp::Reverse(self.sort_key(h)));
         hits.truncate(q.limit);
         hits

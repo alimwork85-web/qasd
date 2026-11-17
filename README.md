@@ -8,9 +8,9 @@
 
 **Developer:** Ali Alhumedi · [Download](https://github.com/alimwork85-web/qasd/releases/latest) · [Changelog / سجل التغييرات](https://github.com/alimwork85-web/qasd/blob/main/CHANGELOG.md)
 
-**Qasd** is a whole-disk file search for Windows. It finds files by name even when you mistype them, searches inside text files through an index, and shows what is using your disk space. It has a search window on **Alt+Q**, a command-line interface with a small background daemon, a Rust crate, and an MCP server for coding agents.
+**Qasd** is a whole-disk file search for Windows. It finds files by name and format even when you mistype them, and shows what is using your disk space. It has a search window on **Alt+Q**, a command-line interface with a small background daemon, a Rust crate, and an MCP server for coding agents.
 
-Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch) (macOS, MIT). The search engine (name index, fuzzy matching, trigram content index, query language, git filters, MCP) comes from fsearch. The macOS-specific layers were rewritten for Windows.
+Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch) (macOS, MIT). The search engine (name index, fuzzy matching, query language, git filters, MCP) comes from fsearch. The macOS-specific layers were rewritten for Windows.
 
 ---
 
@@ -20,7 +20,6 @@ Qasd is a Windows port of [fsearch](https://github.com/noahdunnagan/fsearch) (ma
 - [Search window (Alt+Q)](#search-window-altq)
 - [Query syntax](#query-syntax)
 - [Disk usage](#disk-usage)
-- [Content search (grep)](#content-search-grep)
 - [Speed](#speed)
 - [Administrator rights](#administrator-rights)
 - [API and MCP](#api-and-mcp)
@@ -51,7 +50,7 @@ cargo build --release
 
 ```powershell
 qasd qasd main                 # find files by name
-qasd "ext:rs grep:apply_dir"   # search inside files
+qasd "ext:pdf invoice"         # by name and format
 ```
 
 ---
@@ -62,7 +61,7 @@ Press **Alt+Q** anywhere. A search box opens over whatever you are doing, and re
 
 | Key | Action |
 | --- | --- |
-| Typing | Search by name, or use `grep:` to search inside files |
+| Typing | Search by name and format (`ext:pdf`, `type:image`) |
 | ↑ ↓, PgUp, PgDn | Move through results |
 | Enter | Open the file |
 | Ctrl+Enter | Show the file in its folder |
@@ -91,8 +90,6 @@ Press **Alt+Q** anywhere. A search box opens over whatever you are doing, and re
 ```text
 qasd "readme in:~\Documents"              # inside a folder (C:\..., ~\..., or relative)
 qasd "type:image size:>5mb mtime:<7d"     # by type, size and modification time
-qasd "ext:rs regex:fn\s+\w+_dir"          # regex inside files
-qasd "sym:apply_dir"                      # where a symbol is defined
 qasd "src/**/*.{c,h} !test/ init"         # globs; ! excludes
 qasd "git:modified in:~\Projects\app"     # git status filters
 ```
@@ -105,7 +102,7 @@ qasd "git:modified in:~\Projects\app"     # git status filters
 - `!exclude` leaves out matches.
 - Arabic words also match their other common spellings: with or without hamza (ا أ إ), ة or ه, ى or ي, and with or without diacritics. `اسامه` finds `أسامة`.
 - A word typed with the wrong keyboard layout still finds what you meant: `قثشيةث` finds `readme`, and `sghl` finds `سلام`.
-- A phrase with spaces goes in quotes, for example `grep:"fn main"`.
+- A phrase with spaces goes in quotes, for example `"annual report"`.
 
 **Filters:**
 
@@ -118,9 +115,6 @@ qasd "git:modified in:~\Projects\app"     # git status filters
 | `mtime:` | Modification time |
 | `path:` | Match against the full path |
 | `re:` | Regex on names |
-| `grep:` | Text inside files |
-| `regex:` | Regex inside files |
-| `sym:` | Symbol definitions |
 | `dupe:` | Files with an identical copy elsewhere, grouped (1 MB or larger; system, program and AppData folders are left out). Combine it with other filters: `dupe: in:~\Pictures type:image` |
 | `limit:` | Maximum number of results |
 | `git:` | Git status: `modified`, `staged`, `untracked`, `clean`, `tracked`, `ignored`, `conflict` |
@@ -139,18 +133,6 @@ Enter goes into a folder, Backspace goes up one level, and Esc returns to search
 
 ---
 
-## Content search (grep)
-
-Qasd indexes file contents as well as names.
-
-- Text files in your user folder up to **1 MB** are indexed. Inside git repositories the limit is **10 MB**.
-- Folders that git ignores are skipped.
-- `AppData`, lockfiles, large JSON files, minified assets and build output are skipped.
-- To skip more folders, add them to `%LOCALAPPDATA%\Qasd\content-skip.txt`, one per line.
-- `in:` with a folder outside your user folder searches that folder by reading its files directly.
-
----
-
 ## Speed
 
 Measured on Windows 11 with a C: drive holding about 2 million entries.
@@ -161,7 +143,6 @@ Measured on Windows 11 with a C: drive holding about 2 million entries.
 | First full index, as a normal user (folder crawl) | 9.5 s warm, 34 s cold |
 | Restart, catching up on changes (change journal) | 0.08 s |
 | Find a file by name, in the daemon | ~0.8 ms |
-| Grep, first page, in the daemon | ~0.3 ms |
 | CLI search, end to end (mostly Windows process start) | ~28 ms |
 | New, renamed, edited or deleted file appears in results | Under one CLI round trip (~30 ms) |
 | Name index on disk | 59 MB |
@@ -193,13 +174,12 @@ The change journal (restart catch-up and overflow recovery) works with or withou
 
 ```json
 {"q": "qasd main", "limit": 20, "offset": 20}
-{"op": "grep", "pattern": "apply_dir", "in": "C:\\Users\\me\\Projects", "context": 2}
 {"q": "main.rs", "boost": true, "near": "C:\\Users\\me\\app\\src\\lib.rs", "git": true}
 {"op": "open", "path": "C:\\Users\\me\\app\\src\\main.rs"}
 {"op": "recent", "in": "~\\Projects\\app"}
 ```
 
-**MCP server for coding agents.** `qasd mcp` runs an MCP server over stdio. It provides `find_files`, `grep` and `multi_grep`.
+**MCP server for coding agents.** `qasd mcp` runs an MCP server over stdio. It provides `find_files`.
 
 ```powershell
 claude mcp add -s user qasd -- "%LOCALAPPDATA%\Qasd\bin\qasd.exe" mcp
@@ -252,8 +232,8 @@ Symbolic links, junctions and mount points are listed as links and never followe
 | --- | --- | --- |
 | Price and license | Freeware | MIT, open source |
 | Search by file name | Yes, instant | Yes, with typo tolerance |
-| Search inside files | Yes, through `content:`, but files are not indexed and the search is slow | Yes, through a trigram content index for text files up to 1 MB (10 MB in git repos) |
-| Regex | Yes | Yes (`regex:` and `re:`) |
+| Search inside files | Yes, through `content:`, but files are not indexed and the search is slow | No: names and formats only, to stay light |
+| Regex | Yes | Yes, on names (`re:`) |
 | Boolean operators | Yes (`\|`, `!`, default AND) | Yes (`!` for exclusion, plus `'exact`, `^prefix`, `suffix$`) |
 | Git status filters | No | Yes (`git:modified`, `git:staged`, and others) |
 | Disk usage view | Not in its documentation | Yes (Ctrl+U) |
@@ -263,19 +243,18 @@ Symbolic links, junctions and mount points are listed as links and never followe
 
 **Choose Everything** if you mainly search by file name, want the most mature tool, or need network and SDK integrations.
 
-**Choose Qasd** if you want one tool that combines name search, typo tolerance, content search, and disk usage, and you want to read or change the code.
+**Choose Qasd** if you want one tool that combines name search, typo tolerance, Arabic spellings, duplicate files and disk usage, and you want to read or change the code.
 
 **Notes on the comparison:**
 
 - Qasd's speed numbers are measured on one machine. They have not been run side by side with Everything on the same hardware.
 - "Not in its documentation" means the features are not described in Everything's official FAQ. It does not mean they are impossible.
-- Everything's official FAQ says it indexes only file and folder names, and that content search is slow because content is not indexed.
 
 ---
 
 ## Limitations
 
-- Content search covers only text files under the size limits above. Binary files and large files are not searched inside.
+- Qasd searches names and formats only, not the text inside files.
 - Files that exist only in OneDrive's cloud are never downloaded by a search or a preview.
 - Index times on the first run depend on the number of files. Without administrator rights, the first index of a large drive is slower (see [Speed](#speed)).
 
@@ -291,7 +270,7 @@ Short version: open an issue for bugs and ideas, run `cargo fmt` and `cargo test
 
 ## بالعربية
 
-**قصد** أداة بحث فائقة السرعة في كل أقراص ويندوز، وهي نسخة لويندوز من أداة fsearch التي تعمل على ماك فقط. تبحث في أسماء الملفات بتسامح مع الأخطاء الإملائية، وفي محتوى الملفات النصية عبر فهرس يبقى محدّثاً لحظياً.
+**قصد** أداة بحث فائقة السرعة في كل أقراص ويندوز، وهي نسخة لويندوز من أداة fsearch التي تعمل على ماك فقط. تبحث في أسماء الملفات وصيغها بتسامح مع الأخطاء الإملائية.
 
 **التثبيت:** نزّل ملف zip من صفحة [الإصدارات](https://github.com/alimwork85-web/qasd/releases)، ثم فك الضغط واضغط مرتين على `install.cmd`.
 
@@ -309,7 +288,6 @@ Short version: open an issue for bugs and ideas, run `cargo fmt` and `cargo test
 
 ```powershell
 qasd تقرير                          # بالاسم
-qasd "ext:md grep:الميزانية"         # داخل الملفات
 qasd "in:~\Desktop pdf"             # داخل مجلد محدد
 qasd "dupe: in:~\Pictures"         # الصور المكررة
 ```

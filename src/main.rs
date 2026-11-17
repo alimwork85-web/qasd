@@ -31,7 +31,7 @@ usage:
 
 examples:
   qasd qasd main                       find files by name (typos forgiven)
-  qasd \"ext:rs grep:apply_dir\"         search inside files
+  qasd \"dupe: in:~\\Pictures\"         files with an identical copy
   qasd \"report in:~\\Documents\"        inside a folder
   qasd \"type:image size:>5mb mtime:<7d\"";
 
@@ -129,11 +129,8 @@ fn bench(qs: &str) {
     let idx = index::Index::load(&dir.join("index.bin")).unwrap_or_else(|| die("no index yet; run qasd serve"));
     let live = live::Live::new(idx);
     let home = home();
-    let mut q = query::Query::parse(qs, &home).unwrap_or_else(|e| die(&e));
-    // Like the daemon: a content search when the query has a pattern, on
-    // high-priority threads, paths included.
-    let grep = q.grep.take().map(|p| qasd::Grep::new(&p, q.grep_mode).unwrap_or_else(|e| die(&e)));
-    let content = grep.as_ref().map(|_| qasd::content::Content::open_shared(dir.join("content")));
+    let q = query::Query::parse(qs, &home).unwrap_or_else(|e| die(&e));
+    // Like the daemon: high-priority threads, paths included.
     let pool = rayon::ThreadPoolBuilder::new()
         .start_handler(|_| {
             sys::priority_interactive();
@@ -142,25 +139,14 @@ fn bench(qs: &str) {
         .build()
         .unwrap();
     let run = || -> Vec<String> {
-        let (Some(g), Some(c)) = (&grep, &content) else {
-            let mut p = Vec::new();
-            let hits = pool.install(|| query::Searcher { live: &live }.search(&q));
-            return hits
-                .iter()
-                .map(|h| {
-                    live.base.path(h.idx as usize, &mut p);
-                    format!("{:5} {}", h.score, sys::display(&p))
-                })
-                .collect();
-        };
-        let r = if q.scope.as_ref().is_none_or(|s| qasd::content::in_scope(s, home.as_bytes())) {
-            pool.install(|| c.search(g, &q))
-        } else {
-            let paths = pool.install(|| qasd::content::scan_paths(&live, q.clone_for_scan()));
-            qasd::content::verify(g, &paths, q.limit)
-        };
-        let first = |f: &qasd::FileMatches| f.lines.first().map_or(String::new(), |(n, t)| format!("{n}: {}", t.trim()));
-        r.files.iter().map(|f| format!("{}:{}", sys::display(&f.path), first(f))).collect()
+        let mut p = Vec::new();
+        let hits = pool.install(|| query::Searcher { live: &live }.search(&q));
+        hits.iter()
+            .map(|h| {
+                live.base.path(h.idx as usize, &mut p);
+                format!("{:5} {}", h.score, sys::display(&p))
+            })
+            .collect()
     };
     // Between runs, another name search: a repeat would be answered from
     // the names cache, which only a repeat of the last query hits.

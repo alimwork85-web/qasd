@@ -301,8 +301,7 @@ pub struct MemoPlan {
     pub chunks: Vec<(u32, std::ops::Range<u32>)>,
 }
 
-/// A typed view of one section of `self.map`, `self.$len` long. Shared with
-/// content segments, which use the same file layout (see `layout`).
+/// A typed view of one section of `self.map`, `self.$len` long.
 macro_rules! sec {
     ($name:ident, $s:expr, $t:ty, $len:ident) => {
         pub fn $name(&self) -> &[$t] {
@@ -310,7 +309,6 @@ macro_rules! sec {
         }
     };
 }
-pub(crate) use sec;
 
 /// A reader of value `i` of a `Runs` section.
 macro_rules! runs {

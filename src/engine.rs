@@ -1,8 +1,7 @@
-//! The engine: owns the live name index, follows FSEvents, keeps the content
-//! index current, and answers searches. The daemon runs one; so can any app
+//! The engine: owns the live name index, follows FSEvents, and answers
+//! searches. The daemon runs one; so can any app
 //! that links this crate.
 
-use crate::content::{self, Content, Grep, GrepResult};
 use crate::fsevents::{self, HISTORY_DONE, KERNEL_DROPPED, MUST_SCAN_SUBDIRS, USER_DROPPED};
 use crate::index::Index;
 use crate::live::{Applied, Live};
@@ -10,7 +9,7 @@ use crate::query::{Query, Searcher};
 use crate::walk::{self, KIND_DIR, Listing, NONE, RawEnt};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
@@ -22,8 +21,6 @@ use std::time::{Duration, Instant};
 const COMPACT_PENDING: usize = 50_000;
 const COMPACT_EVERY: Duration = Duration::from_secs(12 * 3600);
 const SCAN_THREADS: usize = 8;
-const CONTENT_QUIET: Duration = Duration::from_secs(2);
-const CONTENT_MAX_WAIT: Duration = Duration::from_secs(300);
 /// How often a follower checks whether it can take over or reload.
 const FOLLOW_EVERY: Duration = Duration::from_secs(10);
 /// Seconds before the last known-good moment that a relist also covers.
@@ -33,7 +30,7 @@ const SYNC_MARGIN: u32 = 120;
 const REPLAY_QUIET: Duration = Duration::from_secs(2);
 
 pub struct Options {
-    /// Where the index lives (`index.bin`, `content/`).
+    /// Where the index lives (`index.bin`).
     pub dir: PathBuf,
     pub home: String,
     /// Folders never to open. `None` decides from Full Disk Access: without
@@ -62,10 +59,6 @@ pub struct Status {
     pub removed: usize,
     pub event_id: u64,
     pub index_bytes: usize,
-    pub content_docs: usize,
-    pub content_segments: usize,
-    pub content_bytes: usize,
-    pub content_pending: usize,
     pub full_disk_access: bool,
     /// Writes the index files (false: following another process's).
     pub owner: bool,
@@ -75,8 +68,6 @@ pub struct Status {
 struct Early {
     dir: Vec<u8>,
     live: Live,
-    /// Its files' content build was asked for.
-    indexing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -89,17 +80,11 @@ struct Shared {
     /// A saved index is still being read in: searches wait for it rather
     /// than answer "indexing".
     loading: (Mutex<bool>, Condvar),
-    content: RwLock<Content>,
     home: String,
     dir: PathBuf,
     /// Wakes the apply loop; an empty batch is a no-op wake-up.
     wake: Sender<Vec<fsevents::Event>>,
     save_requested: AtomicBool,
-    content_tx: Sender<Resync>,
-    content_rx: Mutex<Option<Receiver<Resync>>>,
-    content_pending: AtomicUsize,
-    /// Files changed since their folder's last content sync.
-    dirty: content::Dirty,
     /// Holding `lock`: this engine writes the index files. Another process
     /// may own them (the daemon, an app); then this one follows: it reads
     /// the saved index, keeps it live in memory, and takes over when the
@@ -113,16 +98,9 @@ struct Shared {
     since: AtomicU64,
     /// The stream is still replaying history (until HISTORY_DONE).
     replaying: AtomicBool,
-    /// Follower: content dir mtime when its segments were last opened.
-    content_seen: Mutex<Option<std::time::SystemTime>>,
     /// First run, until the whole disk is listed: indexes of just the
     /// folders searches asked about (see `with_names`).
     early: Mutex<Vec<Arc<Early>>>,
-    /// The content index holds every file it should: false while its first
-    /// build runs, when greps read the files directly instead...
-    content_ready: AtomicBool,
-    /// ...except in these folders, built first from their early indexes.
-    content_early: Mutex<Vec<Vec<u8>>>,
     /// Told the folders of each batch of disk changes (`Engine::on_change`).
     #[allow(clippy::type_complexity)]
     on_change: RwLock<Vec<Box<dyn Fn(&[(&[u8], bool)]) + Send + Sync>>>,
@@ -137,7 +115,7 @@ fn log(msg: impl AsRef<str>) {
 }
 
 /// On macOS this stopped iCloud downloads; on Windows file reads open with
-/// FILE_FLAG_OPEN_NO_RECALL instead (`content::open_file`), so nothing to do.
+/// FILE_FLAG_OPEN_NO_RECALL instead (`sys::open_regular`), so nothing to do.
 pub fn no_materialize() {}
 
 /// Searches run here, at user-interactive QoS: an app's background executor
@@ -222,7 +200,7 @@ impl Engine {
     /// builds one.
     pub fn start(mut opts: Options) -> Result<Engine, String> {
         std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
-        // Home as paths are compared to it: "/h/" put nothing in content scope.
+        // Home as paths are compared to it.
         if opts.home.len() > 1 && opts.home.ends_with('/') {
             opts.home = opts.home.trim_end_matches('/').to_string();
         }
@@ -246,36 +224,26 @@ impl Engine {
         let dir = opts.dir;
         let loading = Index::load(&dir.join("index.bin"));
         let (tx, rx) = std::sync::mpsc::channel();
-        let (ctx, crx) = std::sync::mpsc::channel();
-        let content = if owner { Content::open(dir.join("content")) } else { Content::open_shared(dir.join("content")) };
-        let content_ready = AtomicBool::new(!owner || !content.segs.is_empty());
+        // The content index of older versions: no longer kept.
+        if owner {
+            let _ = std::fs::remove_dir_all(dir.join("content"));
+        }
         let shared = Arc::new(Shared {
             live: RwLock::new(None),
             loading: (Mutex::new(loading.is_some()), Condvar::new()),
-            content: RwLock::new(content),
             home: opts.home,
             dir,
             wake: tx,
             save_requested: AtomicBool::new(false),
-            content_tx: ctx,
-            content_rx: Mutex::new(Some(crx)),
-            content_pending: AtomicUsize::new(0),
-            dirty: Default::default(),
             owner: AtomicBool::new(owner),
             lock,
             stream: Mutex::new(None),
             streams: Default::default(),
             since: AtomicU64::new(0),
             replaying: AtomicBool::new(true),
-            content_seen: Mutex::new(None),
             early: Mutex::new(Vec::new()),
-            content_ready,
-            content_early: Mutex::new(Vec::new()),
             on_change: RwLock::new(Vec::new()),
         });
-        if owner {
-            start_content(&shared);
-        }
         let s = shared.clone();
         // Starting the stream (loading CoreServices) and faulting a saved
         // index in take ms each: done once searches run on the index as
@@ -370,7 +338,7 @@ impl Engine {
         if q.dupes {
             return self.dupes(q);
         }
-        let (found, early) = self.s.with_names(q.scope.as_deref(), |live| {
+        let (found, _) = self.s.with_names(q.scope.as_deref(), |live| {
             let mut p = Vec::new();
             search_pool()
                 .install(|| Searcher { live }.search(q))
@@ -392,15 +360,13 @@ impl Engine {
                 })
                 .collect()
         })?;
-        self.s.index_first(early);
         Ok(found)
     }
 
     /// `dupe:`: the files `q` names that have a copy, group after group
     /// (see `dupes`). Picked under the lock, read after releasing it.
     fn dupes(&self, q: &Query) -> Result<Vec<Found>, String> {
-        let (cands, early) = self.s.with_names(q.scope.as_deref(), |live| search_pool().install(|| crate::dupes::candidates(live, q)))?;
-        self.s.index_first(early);
+        let (cands, _) = self.s.with_names(q.scope.as_deref(), |live| search_pool().install(|| crate::dupes::candidates(live, q)))?;
         let _hold = walk::Hold::new();
         let groups = search_pool().install(|| crate::dupes::groups(cands));
         let mut found = Vec::new();
@@ -414,50 +380,8 @@ impl Engine {
         Ok(found)
     }
 
-    /// Content search: `g` is the pattern, `q` narrows which files are read.
-    /// The bool says whether the content index answered (false: files were
-    /// picked from the name index and read, for folders it doesn't cover).
-    pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
-        WARM_UNTIL.store(0, Ordering::Relaxed);
-        let home = self.s.home.as_bytes();
-        let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home));
-        let built = indexed && self.s.content_holds(q.scope.as_deref());
-        if built {
-            let fresh = self.s.dirty.files(q);
-            let c = self.s.content.read().unwrap();
-            // A folder the index holds nothing in (one its .gitignore leaves
-            // out, say) is read directly, below.
-            if q.scope.as_ref().is_none_or(|s| c.holds(s)) {
-                // Content search brings its own reader threads; running it
-                // here skips waking a pool thread just to hand the work over.
-                return Ok((c.search_with(g, q, &fresh), true));
-            }
-        }
-        // Pick files under the lock, read them after releasing it: reading can
-        // be slow and a waiting writer would stall every other query.
-        let scope = q.scope.as_deref();
-        if indexed && !built {
-            // The content index's first build is running: read the files it
-            // will hold instead, so the answer is complete (and the same).
-            // None there: read the folder directly, below, as once built.
-            let (docs, early) = self.s.with_names(scope, |live| content::wanted(live, home, scope.unwrap_or(home), true))?;
-            if !docs.is_empty() {
-                let hold = walk::Hold::new();
-                let r = content::grep_unindexed(g, docs, q);
-                drop(hold);
-                self.s.index_first(early);
-                return Ok((r, false));
-            }
-            self.s.index_first(early);
-        }
-        let (paths, _) = self.s.with_names(scope, |live| search_pool().install(|| content::scan_paths(live, q.clone_for_scan())))?;
-        let _hold = walk::Hold::new();
-        Ok((content::verify(g, &paths, q.limit), false))
-    }
-
     pub fn status(&self) -> Status {
         let l = self.s.live.read().unwrap();
-        let c = self.s.content.read().unwrap();
         Status {
             ready: l.is_some(),
             entries: l.as_ref().map_or(0, |l| l.base.n),
@@ -466,10 +390,6 @@ impl Engine {
             removed: l.as_ref().map_or(0, |l| l.dead_count),
             event_id: l.as_ref().map_or(0, |l| l.event_id),
             index_bytes: l.as_ref().map_or(0, |l| l.base.bytes()),
-            content_docs: c.docs(),
-            content_segments: c.segs.len(),
-            content_bytes: c.bytes(),
-            content_pending: self.s.content_pending.load(Ordering::Relaxed),
             full_disk_access: walk::SKIP.get().is_none(),
             owner: self.s.owner(),
         }
@@ -493,9 +413,6 @@ impl Engine {
         self.s.on_change.write().unwrap().push(Box::new(f));
     }
 }
-
-/// (dirs, trees) for the content worker to re-sync.
-type Resync = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 
 /// The answer while the first index builds, with its progress.
 fn indexing() -> String {
@@ -547,29 +464,9 @@ impl Shared {
         drop(hold);
         let live = Live::new(Index::build(ls, 0, 0, self.home.as_bytes()));
         log(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
-        let e = Arc::new(Early { dir: dir.to_vec(), live, indexing: AtomicBool::new(false) });
+        let e = Arc::new(Early { dir: dir.to_vec(), live });
         early.push(e.clone());
         Some(e)
-    }
-
-    /// Once a search answered from an early index: index the contents of
-    /// its folder first (from that index), so its next greps use the index
-    /// within seconds instead of reading every file. Not sooner: that
-    /// build reads the same files as the answer's direct scan.
-    fn index_first(&self, early: Option<Arc<Early>>) {
-        if let Some(e) = early
-            && self.owner()
-            && content::in_scope(&e.dir, self.home.as_bytes())
-            && !e.indexing.swap(true, Ordering::Relaxed)
-        {
-            let _ = self.content_tx.send((Vec::new(), vec![e.dir.clone()]));
-        }
-    }
-
-    /// Does the content index hold every file under `scope` (all it should
-    /// hold, without one)?
-    fn content_holds(&self, scope: Option<&[u8]>) -> bool {
-        self.content_ready.load(Ordering::Acquire) || scope.is_some_and(|s| self.content_early.lock().unwrap().iter().any(|f| under(s, f)))
     }
 
     /// (Re)start the FSEvents stream from `since`, replacing any old one.
@@ -585,7 +482,7 @@ impl Shared {
     }
 
     /// A follower picks up what the owner wrote: a newer name-index save
-    /// (replaying FSEvents from it) and content segment changes.
+    /// (replaying FSEvents from it).
     fn follow(&self) {
         let path = self.dir.join("index.bin");
         let saved = Index::saved_event_id(&path).unwrap_or(0);
@@ -597,20 +494,7 @@ impl Shared {
             self.watch(base.event_id);
             *self.live.write().unwrap() = Some(Live::new(base));
         }
-        let cdir = self.dir.join("content");
-        let changed = std::fs::metadata(&cdir).and_then(|m| m.modified()).ok();
-        let mut seen = self.content_seen.lock().unwrap();
-        if changed != *seen {
-            *seen = changed;
-            *self.content.write().unwrap() = Content::open_shared(cdir);
-        }
     }
-}
-
-fn start_content(s: &Arc<Shared>) {
-    let Some(rx) = s.content_rx.lock().unwrap().take() else { return };
-    let s = s.clone();
-    spawn("qasd-content", move || content_loop(&s, rx));
 }
 
 /// A follower takes over the index files once their owner is gone.
@@ -623,9 +507,7 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
     }
     s.owner.store(true, Ordering::Relaxed);
     log("took over the index from a previous owner");
-    *s.content.write().unwrap() = Content::open(s.dir.join("content"));
     rescan_unskipped(s);
-    start_content(s);
     true
 }
 
@@ -748,181 +630,6 @@ pub fn has_full_disk_access() -> bool {
     crate::sys::elevated()
 }
 
-#[derive(Clone, Copy)]
-enum Qos {
-    Utility,
-    Initiated,
-}
-
-fn content_pool(threads: usize, qos: Qos) -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(move |_| {
-            match qos {
-                Qos::Utility => crate::sys::priority_utility(),
-                Qos::Initiated => crate::sys::priority_initiated(),
-            }
-            no_materialize();
-        })
-        .build()
-        .unwrap()
-}
-
-fn content_loop(shared: &Shared, rx: Receiver<Resync>) {
-    // Indexing file contents is background work: utility QoS keeps it off
-    // the user's way (lower CPU priority and IO tier).
-    crate::sys::priority_utility();
-    let pool = content_pool(4, Qos::Utility);
-    let home = shared.home.as_bytes().to_vec();
-    // First run, while the whole disk is listed: index the folders searches
-    // ask about from their early indexes. (A request that comes as the
-    // whole index lands is dropped: the sync of all of home covers it.)
-    while shared.live.read().unwrap().is_none() {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok((_, dirs)) => {
-                for dir in dirs {
-                    let Some(e) = shared.early.lock().unwrap().iter().find(|e| e.dir == dir).cloned() else { continue };
-                    sync_wants(shared, &pool, content::wants(&e.live, &home, &[], std::slice::from_ref(&dir)));
-                    shared.content_early.lock().unwrap().push(dir);
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
-        }
-    }
-    // Reconcile all of home once, right away (cheap when nothing changed),
-    // then follow along with the name index's changes.
-    sync(shared, &pool, &home, &[], std::slice::from_ref(&home));
-    shared.content_ready.store(true, Ordering::Release);
-    // Per-folder debounce: a folder is processed 2s after its last change,
-    // or 5 min after its first pending one if it never goes quiet. A file you
-    // save lands in ~2s; files apps rewrite every second (state, logs) cost
-    // one reindex per 5 min instead of one per event batch.
-    let mut pending: HashMap<(Vec<u8>, bool), (Instant, Instant)> = HashMap::new();
-    loop {
-        let wait = if pending.is_empty() { Duration::from_secs(3600) } else { Duration::from_millis(250) };
-        match rx.recv_timeout(wait) {
-            Ok(first) => {
-                let now = Instant::now();
-                let mut changed = Vec::new();
-                for (d, t) in std::iter::once(first).chain(rx.try_iter()) {
-                    for key in d.into_iter().map(|p| (p, false)).chain(t.into_iter().map(|p| (p, true))) {
-                        // Most of the disk's churn (Library, caches) is outside the indexed area.
-                        if content::in_scope(&key.0, &home)
-                            || (key.1 && home.starts_with(&key.0) && (key.0.ends_with(b"/") || home[key.0.len()..].starts_with(b"/")))
-                        {
-                            pending.entry(key.clone()).and_modify(|e| e.1 = now).or_insert((now, now));
-                            changed.push(key);
-                        }
-                    }
-                }
-                // Until they are synced, searches read their changed files.
-                changed.sort();
-                changed.dedup();
-                let wants = shared.live.read().unwrap().as_ref().map(|l| content::wanted_now(l, &home, &changed));
-                if let Some(w) = wants {
-                    shared.dirty.mark(&shared.content.read().unwrap(), w);
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
-        }
-        let ripe: Vec<(Vec<u8>, bool)> = pending
-            .iter()
-            .filter(|(_, (first, last))| last.elapsed() >= CONTENT_QUIET || first.elapsed() >= CONTENT_MAX_WAIT)
-            .map(|(k, _)| k.clone())
-            .collect();
-        if ripe.is_empty() {
-            continue;
-        }
-        let (mut dirs, mut trees) = (Vec::<Vec<u8>>::new(), Vec::<Vec<u8>>::new());
-        for k in &ripe {
-            pending.remove(k);
-            if k.1 { trees.push(k.0.clone()) } else { dirs.push(k.0.clone()) }
-        }
-        sync(shared, &pool, &home, &dirs, &trees);
-        shared.dirty.clear(&ripe);
-    }
-}
-
-/// Bring the content index in line with the name index for these folders
-/// (direct children) and trees.
-fn sync(shared: &Shared, pool: &rayon::ThreadPool, home: &[u8], dirs: &[Vec<u8>], trees: &[Vec<u8>]) {
-    let wants = {
-        let g = shared.live.read().unwrap();
-        let Some(live) = g.as_ref() else { return };
-        content::wants(live, home, dirs, trees)
-    };
-    sync_wants(shared, pool, wants);
-}
-
-/// `sync`, given what the name index wants.
-fn sync_wants(shared: &Shared, pool: &rayon::ThreadPool, wants: Vec<(Vec<u8>, bool, content::Docs)>) {
-    let t = Instant::now();
-    // (A folder built early leaves segments behind; the build is still the first.)
-    let first = !shared.content_ready.load(Ordering::Acquire);
-    let todo = shared.content.write().unwrap().diff(wants);
-    if todo.is_empty() {
-        return;
-    }
-    let n = todo.len();
-    shared.content_pending.store(n, Ordering::Relaxed);
-    // A first build (fresh install, format change) is a one-time wait the
-    // user is watching: 8 threads at user-initiated QoS. Each thread keeps
-    // its next files opened ahead, and past 8 threads those opens only
-    // contend in the kernel. Measured on HOME (730k files, M4 Max, with
-    // speed-content's open-ahead build): 99-155 s on the 4 utility threads;
-    // 8 threads 17.2-17.5 s (61 s system CPU), 12 threads 22.0-24.3 s, 16
-    // threads 27.2-30.1 s (250-300 s system CPU).
-    let fast;
-    let pool = if first {
-        let threads = std::thread::available_parallelism().map_or(8, |n| n.get()).min(8);
-        fast = content_pool(threads, Qos::Initiated);
-        &fast
-    } else {
-        pool
-    };
-    build_batches(shared, pool, &todo);
-    drop(todo);
-    // Keep the segment count small: merge size tiers of 8.
-    loop {
-        let plan = shared.content.read().unwrap().merge_plan();
-        let Some(ids) = plan else { break };
-        let (dir, id) = {
-            let mut c = shared.content.write().unwrap();
-            (c.dir.clone(), c.alloc_id())
-        };
-        let merged = {
-            let c = shared.content.read().unwrap();
-            pool.install(|| content::merge(&dir, id, &c.segments(&ids)))
-        };
-        match merged {
-            Some(seg) => shared.content.write().unwrap().replace(&ids, seg),
-            None => break,
-        }
-    }
-    if n > 100 {
-        log(format!("content: indexed {n} files in {:.2?}", t.elapsed()));
-    }
-    release_memory();
-}
-
-/// Build `todo` into segments one batch (`Docs::batches`) at a time, each
-/// pushed when done. Two in flight overlapped one's single-threaded tail
-/// with the next one's reads: on the M6 (Linux, ABBA n=10) 3.07 s instead
-/// of 3.33, but a first-run peak of 616 MB instead of 375.
-fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs) {
-    let dir = shared.content.read().unwrap().dir.clone();
-    for range in todo.batches() {
-        walk::yield_to_searches();
-        let id = shared.content.write().unwrap().alloc_id();
-        if let Some(seg) = pool.install(|| content::build_segment(&dir, id, todo, range.clone())) {
-            shared.content.write().unwrap().push(seg);
-        }
-        shared.content_pending.fetch_sub(range.len(), Ordering::Relaxed);
-    }
-}
-
 fn full_build(shared: &Shared, event_id: u64) -> Index {
     let t = Instant::now();
     let started = crate::query::now_secs();
@@ -942,7 +649,7 @@ fn full_build(shared: &Shared, event_id: u64) -> Index {
 }
 
 /// Hand freed allocator memory back to the OS after big transient work
-/// (index builds, content batches) instead of letting malloc cache it.
+/// (index builds) instead of letting malloc cache it.
 fn release_memory() {
     crate::alloc::release();
 }
@@ -970,22 +677,18 @@ fn compact(shared: &Shared) {
 }
 
 /// FSEvents lost track of / (dropped events, or no history back to our
-/// save): relist every folder modified since we were last in sync, plus the
-/// folders of indexed text files edited since (an edit in place doesn't
-/// touch its folder). Seconds, instead of recrawling the whole disk.
+/// save): relist every folder modified since we were last in sync.
+/// Seconds, instead of recrawling the whole disk.
 fn relist_changed(shared: &Shared, why: &str, flags: u32) {
     let t = Instant::now();
     let started = crate::query::now_secs();
     // synced_at 0 (unknown) relists everything: a full crawl, done in place.
-    let (from, mut dirs) = {
+    let (from, dirs) = {
         let g = shared.live.read().unwrap();
         let live = g.as_ref().unwrap();
         let from = live.synced_at.saturating_sub(SYNC_MARGIN);
         (from, live.changed_dirs(from))
     };
-    dirs.extend(shared.content.read().unwrap().changed_dirs(from));
-    dirs.sort();
-    dirs.dedup();
     let stat_time = t.elapsed();
     // Disk reads under the read lock, one folder per write, so searches keep
     // answering meanwhile.
@@ -993,14 +696,13 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
         let f = shared.live.read().unwrap().as_ref().unwrap().fetch(d, false);
         shared.live.write().unwrap().as_mut().unwrap().apply(f);
     }
-    let trees = {
+    {
         let mut g = shared.live.write().unwrap();
         let live = g.as_mut().unwrap();
         live.synced_at = started;
-        std::mem::take(&mut live.trees)
-    };
+        live.trees.clear();
+    }
     let n = dirs.len();
-    let _ = shared.content_tx.send((dirs, trees));
     shared.on_change.read().unwrap().iter().for_each(|f| f(&[(&b"/"[..], true)]));
     log(format!(
         "FSEvents lost track of / ({why}, flags {flags:#x}): relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)",
@@ -1143,7 +845,6 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
                 hooks.iter().for_each(|f| f(&changed));
             }
             drop(hooks);
-            let mut trees = Vec::new();
             // Read the disk under the read lock, then apply in memory: a
             // search never waits on a folder listing or a new subtree's scan.
             let fetched: Vec<_> = {
@@ -1172,11 +873,8 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
                     Some((from, _)) => live.event_id.min(from),
                     None => live.event_id.max(max_id.min(pace.floor().saturating_sub(1))),
                 };
-                trees.append(&mut live.trees);
+                live.trees.clear();
             }
-            let (rec, flat): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|(_, (r, _))| *r);
-            trees.extend(rec.into_iter().map(|(p, _)| p));
-            let _ = shared.content_tx.send((flat.into_iter().map(|(p, _)| p).collect(), trees));
         }
         let replay = gap.filter(|(_, at)| at.elapsed() >= REPLAY_QUIET).map(|(from, _)| from);
         if rebuild || (replay.is_some() && replays >= 3) {

@@ -4,7 +4,7 @@
 use crate::frecency::{self, Frecency};
 use crate::git::{self, Git};
 use qasd::walk::{KIND_DIR, KIND_FILE, KIND_LINK};
-use qasd::{Engine, Found, GrepMode, Options, Query};
+use qasd::{Engine, Found, Options, Query};
 use regex::bytes::Regex;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -201,16 +201,12 @@ struct Hit<'a> {
 fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
     let engine = &cx.engine;
     let op = v.get("op").and_then(Value::as_str).unwrap_or("search");
-    let is_grep = op == "grep"
-        || (op == "search"
-            && v.get("q").and_then(Value::as_str).is_some_and(|q| ["grep:", "regex:", "sym:", "content:", "symbol:"].iter().any(|k| q.contains(k))));
     match op {
         "ping" => Ok(Reply::Value(json!({"ok": true}))),
         "save" => {
             engine.save();
             Ok(Reply::Value(json!({"ok": true, "scheduled": true})))
         }
-        _ if is_grep => grep(v, cx).map(Reply::Value),
         "open" => {
             // An editor or agent opened these: they rank higher for a while.
             let paths: Vec<&str> = match (v.get("path"), v.get("paths")) {
@@ -277,7 +273,7 @@ fn run(v: &Value, cx: &Ctx) -> Result<Reply, String> {
         }
         "search" | "glob" => {
             let (mut q, sels) = parse_request(v, engine.home())?;
-            let x = Extras::parse(v, &mut q, sels, op == "glob", false)?;
+            let x = Extras::parse(v, &mut q, sels, op == "glob")?;
             let t = Instant::now();
             if x.plain() {
                 let found = engine.search(&q)?;
@@ -354,11 +350,10 @@ const MAX_REPOS: usize = 16;
 const MAX_DIRS: usize = 64;
 
 impl Extras {
-    fn parse(v: &Value, q: &mut Query, sels: Vec<(git::Sel, bool)>, glob_op: bool, grep: bool) -> Result<Extras, String> {
+    fn parse(v: &Value, q: &mut Query, sels: Vec<(git::Sel, bool)>, glob_op: bool) -> Result<Extras, String> {
         let cwd = v.get("cwd").and_then(Value::as_str).map(real);
-        // `cursor` too, except in a grep: there it is where the content
-        // index's ranking resumes (see `grep`), not a count of files shown.
-        let at = v.get("offset").or(v.get("cursor").filter(|_| !grep));
+        // `cursor` too.
+        let at = v.get("offset").or(v.get("cursor"));
         let mut x = Extras {
             offset: 0,
             paged: glob_op || at.is_some(),
@@ -561,8 +556,6 @@ fn real(p: &str) -> Vec<u8> {
 
 /// The most hits a search looks through for a page that passes its globs.
 const MAX_FETCH: usize = 20_000;
-/// The most files a grep looks through for a page that passes its globs.
-const MAX_GREP: usize = 2_000;
 
 /// Results passing `keep`, best first, more than `want` of them unless
 /// the search runs dry, stops early (out of time: then true) or reaches
@@ -576,7 +569,7 @@ fn fetch_kept<T>(
     mut search: impl FnMut(usize) -> Result<(Vec<T>, bool), String>,
 ) -> Result<(Vec<T>, bool), String> {
     // Room for some to fail the filters (not for ignored files: few name
-    // or content hits are); more if too many do.
+    // hits are); more if too many do.
     let mut fetch = if x.globs.is_empty() && x.sels.is_empty() { want.saturating_add(1) } else { want.saturating_mul(2).saturating_add(16) };
     loop {
         let n = fetch.min(cap);
@@ -753,132 +746,6 @@ fn glob_exts(g: &str) -> Vec<Vec<u8>> {
     let exts: Vec<Vec<u8>> = list.split(',').map(|e| e.to_ascii_lowercase().into_bytes()).collect();
     let plain = exts.iter().all(|e| !e.is_empty() && e.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
     if plain { exts } else { Vec::new() }
-}
-
-/// Content search. The pattern comes from `pattern` (+ `mode`), `patterns`
-/// (any of these literals) or from a `grep:`/`regex:`/`sym:` filter in `q`;
-/// the rest of the query narrows which files are read, or `file` names the
-/// one to read. Also: `case`, `context` / `before` / `after` (lines around
-/// matches), `defs` (mark definitions),
-/// `cursor` (the `next` of the page before; with `offset`, globs or `git:`
-/// the `next` is an offset instead).
-fn grep(v: &Value, cx: &Ctx) -> Result<Value, String> {
-    let engine = &cx.engine;
-    let (mut q, sels) = parse_request(v, engine.home())?;
-    let x = Extras::parse(v, &mut q, sels, false, true)?;
-    let mode = match v.get("mode").and_then(Value::as_str) {
-        Some("regex") => GrepMode::Regex,
-        Some("symbol") => GrepMode::Symbol,
-        Some("literal") => GrepMode::Literal,
-        Some(m) => return Err(format!("unknown mode {m}")),
-        None => q.grep_mode,
-    };
-    let case = match v.get("case").and_then(Value::as_str) {
-        None | Some("smart") => qasd::Case::Smart,
-        Some("sensitive") => qasd::Case::Sensitive,
-        Some("insensitive") => qasd::Case::Insensitive,
-        Some(c) => return Err(format!("unknown case {c}")),
-    };
-    let pattern = v.get("pattern").and_then(Value::as_str).map(str::to_string).or(q.grep.take());
-    let mut g = match (v.get("patterns").and_then(Value::as_array), pattern) {
-        (Some(ps), _) => qasd::Grep::any_of(&ps.iter().filter_map(Value::as_str).collect::<Vec<_>>(), case)?,
-        (None, Some(p)) => qasd::Grep::with_case(&p, mode, case)?,
-        (None, None) => return Err("grep needs a pattern".into()),
-    };
-    let file = v.get("file").and_then(Value::as_str).map(|f| match f.strip_prefix('~') {
-        Some(r) => format!("{}{r}", engine.home()),
-        None if !f.starts_with('/') => format!("{}/{f}", engine.home()),
-        None => f.to_string(),
-    });
-    let num = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as usize);
-    // One file: its matching lines, up to 200 unless told.
-    g.max_per_file = num("per_file").unwrap_or(if file.is_some() { 200 } else { g.max_per_file });
-    if let Some(ms) = v.get("budget_ms").and_then(Value::as_u64) {
-        g.budget = (ms > 0).then(|| Duration::from_millis(ms));
-    }
-    (g.before, g.after) = (num("before").or(num("context")).unwrap_or(0), num("after").or(num("context")).unwrap_or(0));
-    g.defs = v.get("defs").and_then(Value::as_bool).unwrap_or(false);
-    g.skip = num("cursor").unwrap_or(0);
-    let t = Instant::now();
-    let source = |indexed| if indexed { "index" } else { "scan" };
-    let (r, source, next) = if let Some(f) = &file {
-        let r = qasd::content::grep_file(&g, f.as_bytes());
-        let next = r.next;
-        (r, "file", next)
-    } else if x.plain() {
-        let (r, indexed) = engine.grep(&q, &g)?;
-        let next = r.next;
-        (r, source(indexed), next)
-    } else if x.listed() {
-        // Only the files git lists (modified...), newest first: read them.
-        x.ready(cx, &q)?;
-        let mut paths = from_git(cx, &q.clone_for_scan(), &x, MAX_GREP);
-        paths.retain(|f| f.kind & 3 == KIND_FILE && f.size <= qasd::content::MAX_FILE && x.keep(&cx.git, &qasd::sys::bytes(&f.path)));
-        paths.sort_by_key(|f| std::cmp::Reverse(f.mtime));
-        let paths: Vec<Vec<u8>> = paths.into_iter().map(|f| qasd::sys::bytes(&f.path)).collect();
-        let mut r = qasd::content::verify(&g, &paths, x.offset.saturating_add(q.limit).saturating_add(1));
-        let next = x.cut(&mut r.files, q.limit).or((!r.complete).then_some(x.offset + r.files.len()));
-        (r, "scan", next)
-    } else {
-        x.ready(cx, &q)?;
-        let limit = q.limit;
-        let mut last = None;
-        let (mut files, cut) = fetch_kept(
-            &x,
-            x.offset.saturating_add(limit),
-            MAX_GREP,
-            |f: &qasd::FileMatches| x.keep(&cx.git, &f.path),
-            |n| {
-                q.limit = n;
-                let (mut r, indexed) = engine.grep(&q, &g)?;
-                let (files, cut) = (std::mem::take(&mut r.files), !r.complete);
-                last = Some((r, indexed));
-                Ok((files, cut))
-            },
-        )?;
-        let next = x.cut(&mut files, limit).or(cut.then_some(x.offset + files.len()));
-        let (mut r, indexed) = last.expect("page searched");
-        r.files = files;
-        (r, source(indexed), next)
-    };
-    let files: Vec<Value> = r
-        .files
-        .iter()
-        .map(|f| {
-            let matches = f.lines.iter().zip(&f.hits).map(|((n, t), h)| {
-                let mut m = json!({"line": n, "text": t, "col": h.col, "ranges": h.ranges});
-                if h.def {
-                    m["def"] = true.into();
-                }
-                if g.before > 0 {
-                    m["before"] = json!(h.before);
-                }
-                if g.after > 0 {
-                    m["after"] = json!(h.after);
-                }
-                m
-            });
-            let mut j = json!({"path": String::from_utf8_lossy(&f.path), "matches": matches.collect::<Vec<_>>()});
-            if let Some(w) = x.annotate.then(|| cx.git.status(&f.path).and_then(git::word)).flatten() {
-                j["git"] = w.into();
-            }
-            j
-        })
-        .collect();
-    let mut out = json!({
-        "ok": true,
-        "took_us": t.elapsed().as_micros() as u64,
-        "source": source,
-        "candidates": r.candidates,
-        "read": r.read,
-        "complete": r.complete,
-        "indexing": engine.status().content_pending,
-        "files": files,
-    });
-    if let Some(n) = next {
-        out["next"] = n.into();
-    }
-    Ok(out)
 }
 
 /// `q` is the query language; any filter key may also be given as its own

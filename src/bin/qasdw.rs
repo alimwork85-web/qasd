@@ -68,8 +68,6 @@ struct Item {
     name: String,
     dir: String,
     is_dir: bool,
-    /// A grep hit: line number and text.
-    line: Option<(u64, String)>,
     /// Bytes (a folder: everything in it), if known.
     size: Option<u64>,
     /// Last write, unix seconds (0: unknown).
@@ -347,7 +345,7 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
                         for i in v["items"].as_array().into_iter().flatten() {
                             let name = i["name"].as_str().unwrap_or("");
                             let child = if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") };
-                            let mut it = item(&child, i["kind"] == "dir", None);
+                            let mut it = item(&child, i["kind"] == "dir");
                             it.size = i["size"].as_u64();
                             it.mtime = i["mtime"].as_u64().unwrap_or(0) as u32;
                             it.share = if total > 0 { it.size.unwrap_or(0) as f32 / total as f32 } else { 0.0 };
@@ -387,28 +385,21 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
     }
 }
 
-fn item(path: &str, is_dir: bool, line: Option<(u64, String)>) -> Item {
+fn item(path: &str, is_dir: bool) -> Item {
     let path = sys::display(path.as_bytes());
     let cut = path.rfind('\\').map_or(0, |i| i + 1);
     let (dir, name) = (path[..cut.saturating_sub(1).max(if cut == 3 { 3 } else { 0 })].to_string(), path[cut..].to_string());
     let dir = if dir.is_empty() { path[..cut].to_string() } else { dir };
-    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, line, size: None, mtime: 0, history: false, share: 0.0 }
+    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0 }
 }
 
 fn items(v: &Value) -> Vec<Item> {
     let mut out = Vec::new();
     for h in v["hits"].as_array().into_iter().flatten() {
-        let mut it = item(h["path"].as_str().unwrap_or(""), h["kind"] == "dir", None);
+        let mut it = item(h["path"].as_str().unwrap_or(""), h["kind"] == "dir");
         it.size = h["size"].as_u64();
         it.mtime = h["mtime"].as_u64().unwrap_or(0) as u32;
         out.push(it);
-    }
-    for f in v["files"].as_array().into_iter().flatten() {
-        let p = f["path"].as_str().unwrap_or("");
-        for m in f["matches"].as_array().into_iter().flatten().take(3) {
-            let text = m["text"].as_str().unwrap_or("").trim().to_string();
-            out.push(item(p, false, Some((m["line"].as_u64().unwrap_or(0), text))));
-        }
     }
     out.truncate(LIMIT * 3);
     out
@@ -551,7 +542,7 @@ fn make_preview(seq: u64, path: &str, is_dir: bool, px: i32) -> Preview {
 /// reads as text. Opened without recalling cloud files.
 fn read_text(path: &str) -> Option<Vec<String>> {
     use std::io::Read;
-    let mut f = qasd::content::open_regular(&sys::from_user(path))?;
+    let mut f = qasd::sys::open_regular(&sys::from_user(path))?;
     let mut buf = vec![0u8; 16 * 1024];
     let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
@@ -589,7 +580,7 @@ fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
 fn history_items() -> Vec<Item> {
     history::load()
         .into_iter()
-        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, line: None, size: None, mtime: 0, history: true, share: 0.0 })
+        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0 })
         .collect()
 }
 
@@ -1187,8 +1178,8 @@ fn paint() {
                     DestroyIcon(hi);
                 }
             }
-            // Size and date at the right of the row (not for a grep line).
-            if it.line.is_none() && (it.size.is_some() || it.mtime != 0) {
+            // Size and date at the right of the row.
+            if it.size.is_some() || it.mtime != 0 {
                 let col = scale(140);
                 SelectObject(dc, a.fonts.sub);
                 SetTextColor(dc, t.sub);
@@ -1198,7 +1189,7 @@ fn paint() {
                 draw_text(dc, &local_time(it.mtime), &mut s2, DT_RIGHT);
                 right -= col + scale(10);
             }
-            // Name, then the folder (or a grep hit's line).
+            // Name, then the folder.
             SelectObject(dc, a.fonts.name);
             SetTextColor(dc, t.text);
             let mut r1 = RECT { left, top: y + scale(6), right, bottom: y + scale(27) };
@@ -1206,23 +1197,21 @@ fn paint() {
             SelectObject(dc, a.fonts.sub);
             SetTextColor(dc, t.sub);
             let mut r2 = RECT { left, top: y + scale(27), right, bottom: y + scale(45) };
-            match &it.line {
-                Some((n, text)) => draw_text(dc, &format!("{n}:  {text}"), &mut r2, DT_LEFT | DT_END_ELLIPSIS),
-                // The disk usage view: its part of the folder, as a bar.
-                None if a.usage.is_some() => {
-                    let pct = format!("{:.1}%", it.share * 100.0);
-                    let span = (right - left - scale(64)).max(scale(20));
-                    let track = RECT { left, top: y + scale(32), right: left + span, bottom: y + scale(40) };
-                    round_fill(dc, &track, t.line, scale(4));
-                    let fillw = ((span as f32) * it.share.clamp(0.0, 1.0)) as i32;
-                    if fillw > 0 {
-                        let bar = RECT { left, top: track.top, right: left + fillw.max(scale(4)), bottom: track.bottom };
-                        round_fill(dc, &bar, t.accent, scale(4));
-                    }
-                    let mut pr2 = RECT { left: left + span + scale(8), top: y + scale(27), right, bottom: y + scale(45) };
-                    draw_text(dc, &pct, &mut pr2, DT_LEFT);
+            // The disk usage view: its part of the folder, as a bar.
+            if a.usage.is_some() {
+                let pct = format!("{:.1}%", it.share * 100.0);
+                let span = (right - left - scale(64)).max(scale(20));
+                let track = RECT { left, top: y + scale(32), right: left + span, bottom: y + scale(40) };
+                round_fill(dc, &track, t.line, scale(4));
+                let fillw = ((span as f32) * it.share.clamp(0.0, 1.0)) as i32;
+                if fillw > 0 {
+                    let bar = RECT { left, top: track.top, right: left + fillw.max(scale(4)), bottom: track.bottom };
+                    round_fill(dc, &bar, t.accent, scale(4));
                 }
-                None => draw_text(dc, &it.dir, &mut r2, DT_LEFT | DT_PATH_ELLIPSIS),
+                let mut pr2 = RECT { left: left + span + scale(8), top: y + scale(27), right, bottom: y + scale(45) };
+                draw_text(dc, &pct, &mut pr2, DT_LEFT);
+            } else {
+                draw_text(dc, &it.dir, &mut r2, DT_LEFT | DT_PATH_ELLIPSIS);
             }
             y += scale(ROW);
         }
@@ -1897,7 +1886,7 @@ fn main() {
             std::ptr::null(),
         )
     };
-    let cue = w("ابحث عن ملف أو مجلد…  (grep: للبحث داخل الملفات)");
+    let cue = w("ابحث عن ملف أو مجلد…");
     unsafe { SendMessageW(edit, EM_SETCUEBANNER, 1, cue.as_ptr() as isize) };
 
     let (tx, rx) = std::sync::mpsc::channel();

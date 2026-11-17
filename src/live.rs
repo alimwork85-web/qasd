@@ -73,8 +73,9 @@ pub struct Live {
     pub flat: Flat,
     /// Last FSEvents id fully applied.
     pub event_id: u64,
-    /// Paths of directories added or removed since last drained; the
-    /// content index re-syncs these whole subtrees.
+    /// Paths of directories added or removed since last drained.
+    /// shortcut: nothing reads these since content search went; the engine
+    /// clears them. Remove the field if nothing comes to need it.
     pub trees: Vec<Vec<u8>>,
     /// The last name search's scored names, reused while you type.
     pub names_cache: crate::query::NameCache,
