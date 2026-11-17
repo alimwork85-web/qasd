@@ -51,6 +51,8 @@ const WM_DELETED: u32 = WM_APP + 5;
 /// An uninstaller finished (lparam: Box<Uninstalled>).
 const WM_UNINSTALLED: u32 = WM_APP + 6;
 const TIMER_RETRY: usize = 1;
+/// Frames of the short animations (the window coming in, bars, previews).
+const TIMER_ANIM: usize = 2;
 const LIMIT: usize = 60;
 const MAX_ROWS: usize = 8;
 const CMD_SHOW: usize = 100;
@@ -274,6 +276,12 @@ struct App {
     usage_select: Option<String>,
     /// Setting the search box's text ourselves: not a search.
     quiet: bool,
+    /// The window coming in: when it started, and where it lands (top).
+    show_anim: Option<(Instant, i32)>,
+    /// The disk usage bars growing: since when.
+    bars_anim: Option<Instant>,
+    /// The preview fading in: since when.
+    preview_anim: Option<Instant>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -859,6 +867,10 @@ fn on_preview(p: Box<Preview>) {
     {
         unsafe { DeleteObject(old.bitmap) };
     }
+    if !p.bitmap.is_null() && motion_on() {
+        a.preview_anim = Some(Instant::now());
+        anim_start();
+    }
     a.preview = Some(*p);
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
 }
@@ -908,8 +920,15 @@ fn show() {
     let width = total_width();
     let x = wr.left + (wr.right - wr.left - width) / 2;
     let y = wr.top + (wr.bottom - wr.top) / 4;
+    let moving = motion_on();
     unsafe {
-        SetWindowPos(a.hwnd, HWND_TOPMOST, x, y, width, window_height(), SWP_SHOWWINDOW);
+        // Coming in: from transparent, 6px above where it lands.
+        SetLayeredWindowAttributes(a.hwnd, 0, if moving { 0 } else { 255 }, LWA_ALPHA);
+        SetWindowPos(a.hwnd, HWND_TOPMOST, x, y - if moving { scale(6) } else { 0 }, width, window_height(), SWP_SHOWWINDOW);
+    }
+    if moving {
+        a.show_anim = Some((Instant::now(), y));
+        anim_start();
     }
     layout();
     unsafe {
@@ -920,6 +939,64 @@ fn show() {
     }
     // Fresh results for what's typed (files may have changed meanwhile).
     search();
+}
+
+/// Windows' "Animation effects" setting (off: nothing moves).
+fn motion_on() -> bool {
+    let mut on: i32 = 1;
+    unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut on).cast(), 0) };
+    on != 0
+}
+
+/// Ease-out (cubic) progress, 0..1, of an animation `ms` long started at `t0`.
+fn eased(t0: Instant, ms: u64) -> f32 {
+    let p = (t0.elapsed().as_secs_f32() * 1000.0 / ms as f32).clamp(0.0, 1.0);
+    1.0 - (1.0 - p).powi(3)
+}
+
+const SHOW_MS: u64 = 120;
+const BARS_MS: u64 = 300;
+const PREVIEW_MS: u64 = 120;
+
+/// One frame of whatever is moving; stops the timer when all are done.
+fn anim_tick() {
+    let a = app();
+    if let Some((t0, top)) = a.show_anim {
+        let e = eased(t0, SHOW_MS);
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            GetWindowRect(a.hwnd, &mut r);
+            SetLayeredWindowAttributes(a.hwnd, 0, (e * 255.0) as u8, LWA_ALPHA);
+            SetWindowPos(a.hwnd, std::ptr::null_mut(), r.left, top - ((1.0 - e) * scale(6) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if e >= 1.0 {
+            a.show_anim = None;
+        }
+    }
+    let mut redraw = false;
+    if let Some(t0) = a.bars_anim {
+        redraw = true;
+        if eased(t0, BARS_MS) >= 1.0 {
+            a.bars_anim = None;
+        }
+    }
+    if let Some(t0) = a.preview_anim {
+        redraw = true;
+        if eased(t0, PREVIEW_MS) >= 1.0 {
+            a.preview_anim = None;
+        }
+    }
+    if redraw {
+        unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+    }
+    if a.show_anim.is_none() && a.bars_anim.is_none() && a.preview_anim.is_none() {
+        unsafe { KillTimer(a.hwnd, TIMER_ANIM) };
+    }
+}
+
+/// Start the frames (about 120 a second; GDI is cheap at this size).
+fn anim_start() {
+    unsafe { SetTimer(app().hwnd, TIMER_ANIM, 8, None) };
 }
 
 fn hide() {
@@ -985,6 +1062,10 @@ fn on_results(mut ans: Box<Answer>) {
     {
         // The disk usage view: largest first, the folder said below.
         a.items = std::mem::take(&mut ans.items);
+        if motion_on() {
+            a.bars_anim = Some(Instant::now());
+            anim_start();
+        }
         let place = if dir == "/" { "كل الأقراص".to_string() } else { sys::display(dir.as_bytes()) };
         // (Latin parts isolated left-to-right, so the line reads in order.)
         a.status = format!("{}  ·  {}  ·  {}", items_ar(a.items.len()), ltr(&human_size(total)), ltr(&place));
@@ -1674,7 +1755,8 @@ fn paint() {
                 let span = (right - left - scale(64)).max(scale(20));
                 let track = RECT { left, top: y + scale(32), right: left + span, bottom: y + scale(40) };
                 round_fill(dc, &track, t.line, PILL);
-                let fillw = ((span as f32) * it.share.clamp(0.0, 1.0)) as i32;
+                let grow = a.bars_anim.map_or(1.0, |t0| eased(t0, BARS_MS));
+                let fillw = ((span as f32) * it.share.clamp(0.0, 1.0) * grow) as i32;
                 if fillw > 0 {
                     let bar = RECT { left, top: track.top, right: left + fillw.max(scale(4)), bottom: track.bottom };
                     round_fill(dc, &bar, t.accent, PILL);
@@ -1759,7 +1841,7 @@ fn paint() {
                         ly += lh;
                     }
                 }
-                Some(p) if !p.bitmap.is_null() => draw_bitmap(dc, p.bitmap, &area),
+                Some(p) if !p.bitmap.is_null() => draw_bitmap(dc, p.bitmap, &area, (a.preview_anim.map_or(1.0, |t0| eased(t0, PREVIEW_MS)) * 255.0) as u8),
                 _ => {}
             }
             // What it is.
@@ -1802,7 +1884,7 @@ fn paint() {
 }
 
 /// A 32-bit premultiplied bitmap, scaled down to fit `area`, centered.
-fn draw_bitmap(dc: HDC, b: HBITMAP, area: &RECT) {
+fn draw_bitmap(dc: HDC, b: HBITMAP, area: &RECT, alpha: u8) {
     unsafe {
         let mut bm: BITMAP = std::mem::zeroed();
         if GetObjectW(b, size_of::<BITMAP>() as i32, (&raw mut bm).cast()) == 0 || bm.bmWidth == 0 || bm.bmHeight == 0 {
@@ -1814,7 +1896,7 @@ fn draw_bitmap(dc: HDC, b: HBITMAP, area: &RECT) {
         let (x, y) = (area.left + (aw - w) / 2, area.top + (ah - h) / 2);
         let src = CreateCompatibleDC(dc);
         let old = SelectObject(src, b);
-        let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: 1 };
+        let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: 1 };
         SetStretchBltMode(dc, HALFTONE);
         AlphaBlend(dc, x, y, w, h, src, 0, 0, bm.bmWidth, bm.bmHeight, blend);
         SelectObject(src, old);
@@ -2676,6 +2758,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             on_results(ans);
             0
         }
+        WM_TIMER if wp == TIMER_ANIM => {
+            anim_tick();
+            0
+        }
         WM_TIMER if wp == TIMER_RETRY => {
             unsafe { KillTimer(hwnd, TIMER_RETRY) };
             search();
@@ -2872,7 +2958,7 @@ fn main() {
     let title = w("قصد");
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
             class.as_ptr(),
             title.as_ptr(),
             WS_POPUP,
@@ -2944,6 +3030,9 @@ fn main() {
         usage: None,
         usage_select: None,
         quiet: false,
+        show_anim: None,
+        bars_anim: None,
+        preview_anim: None,
     });
     APP.store(Box::into_raw(app), Ordering::Relaxed);
     unsafe { SendMessageW(edit, WM_SETFONT, crate::app().fonts.input as usize, 1) };
