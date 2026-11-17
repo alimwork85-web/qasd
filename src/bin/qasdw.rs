@@ -45,6 +45,8 @@ const WM_TRAY: u32 = WM_APP + 2;
 const WM_SHOW_ME: u32 = WM_APP + 3;
 /// A preview is ready (lparam: Box<Preview>).
 const WM_PREVIEW: u32 = WM_APP + 4;
+/// A deletion finished (lparam: Box<Deleted>).
+const WM_DELETED: u32 = WM_APP + 5;
 const TIMER_RETRY: usize = 1;
 const LIMIT: usize = 60;
 const MAX_ROWS: usize = 8;
@@ -1161,6 +1163,8 @@ fn key(vk: u32) -> bool {
             history::forget(&a.items[a.sel].name);
             search();
         }
+        // Delete on a result: only with nothing after the caret to delete in the box.
+        VK_DELETE if a.items.get(a.sel).is_some_and(|it| !it.history && !it.app) && caret_at_end() => delete_item(a.sel),
         k if ctrl && k == b'P' as u16 => toggle_preview(),
         VK_APPS => context_menu(a.sel, None),
         VK_F10 if unsafe { GetKeyState(VK_SHIFT as i32) } < 0 => context_menu(a.sel, None),
@@ -1168,6 +1172,13 @@ fn key(vk: u32) -> bool {
         _ => return false,
     }
     true
+}
+
+/// The caret is at the end of the search box, nothing selected.
+fn caret_at_end() -> bool {
+    let (mut s, mut e) = (0u32, 0u32);
+    unsafe { SendMessageW(app().edit, EM_GETSEL, (&raw mut s) as usize, (&raw mut e) as isize) };
+    s == e && e as usize == edit_text(app().edit).encode_utf16().count()
 }
 
 fn selection_in_edit() -> bool {
@@ -1426,11 +1437,11 @@ fn paint() {
             let mut fr = RECT { left: scale(16), top: fy, right: cw - scale(16), bottom: ch };
             draw_text(dc, &a.status, &mut fr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
             let hints = if a.usage.is_some() {
-                "Enter فتح المجلد   ·   Backspace للأعلى   ·   Esc رجوع للبحث"
+                "Enter فتح المجلد   ·   Backspace للأعلى   ·   Delete حذف   ·   Esc رجوع للبحث"
             } else if a.items.get(a.sel).is_some_and(|it| it.history) {
                 "Enter للبحث   ·   Delete للحذف من السجل"
             } else if !a.items.is_empty() {
-                "Enter فتح   ·   Ctrl+Enter المجلد   ·   Ctrl+P المعاينة   ·   اسحب الملف إلى أي برنامج"
+                "Enter فتح   ·   Ctrl+Enter المجلد   ·   Ctrl+P المعاينة   ·   Delete حذف   ·   اسحب الملف إلى أي برنامج"
             } else {
                 ""
             };
@@ -1763,6 +1774,113 @@ fn start_drag(i: usize) {
 const CMD_REVEAL: u32 = 1;
 const CMD_COPY_PATH: u32 = 2;
 const CMD_USAGE: u32 = 3;
+const CMD_DELETE: u32 = 4;
+
+/// What a deletion did, for the window.
+struct Deleted {
+    path: String,
+    name: String,
+    way: qasd::clean::Way,
+    report: qasd::clean::Report,
+}
+
+/// A message box over the window (which stays up meanwhile).
+fn ask(text: &str, flags: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
+    let a = app();
+    a.menu_up = true;
+    let r = unsafe { MessageBoxW(a.hwnd, w(text).as_ptr(), w("قصد").as_ptr(), flags | MB_RTLREADING | MB_RIGHT) };
+    a.menu_up = false;
+    r
+}
+
+/// "3 ملفات": Arabic counted nouns, Western digits.
+fn files_ar(n: u64) -> String {
+    match n {
+        0 => "لا ملفات".into(),
+        1 => "ملف واحد".into(),
+        2 => "ملفان".into(),
+        3..=10 => format!("{n} ملفات"),
+        _ => format!("{n} ملفاً"),
+    }
+}
+
+/// Delete result `i`, after saying what, how big and where it goes.
+/// Protected places are refused (see qasd::clean); the work runs off the UI thread.
+fn delete_item(i: usize) {
+    use qasd::clean::Way;
+    let a = app();
+    let Some(it) = a.items.get(i).filter(|it| !it.history && !it.app) else { return };
+    let (path, name, size) = (it.path.clone(), it.name.clone(), it.size);
+    let way = match qasd::clean::check(&path) {
+        Ok(way) => way,
+        Err(why) => {
+            ask(&format!("لا يمكن حذف «{name}»:
+{why}"), MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+    };
+    let dest = match way {
+        Way::Recycle => "سلة المحذوفات (يمكن استرجاعه منها)",
+        Way::Permanent => "حذف نهائي، لأنه داخل مجلد كاش (لا يمكن استرجاعه)",
+        Way::EmptyCache => "إفراغ مجلد الكاش نهائياً، ويبقى المجلد نفسه (لا يمكن استرجاعه)",
+        Way::Link => "حذف الرابط وحده، لا ما يشير إليه",
+    };
+    let size = size.map_or_else(|| "غير معروف".to_string(), |n| ltr(&human_size(n)));
+    let text = format!("حذف «{name}»؟
+
+المسار: {}
+الحجم: {size}
+الوجهة: {dest}", ltr(&path));
+    if ask(&text, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES {
+        return;
+    }
+    a.status = "جارٍ الحذف…".into();
+    unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+    let hw = a.hwnd as usize;
+    std::thread::spawn(move || {
+        let report = qasd::clean::delete(&path, way);
+        let p = Box::into_raw(Box::new(Deleted { path, name, way, report }));
+        if unsafe { PostMessageW(hw as HWND, WM_DELETED, 0, p as isize) } == 0 {
+            drop(unsafe { Box::from_raw(p) });
+        }
+    });
+}
+
+fn on_deleted(d: Box<Deleted>) {
+    use qasd::clean::Way;
+    let a = app();
+    let r = &d.report;
+    a.status = match (&r.error, d.way) {
+        (Some(e), _) => e.clone(),
+        (None, Way::Recycle) => format!("نُقل «{}» إلى سلة المحذوفات", d.name),
+        (None, Way::Link) => "حُذف الرابط".into(),
+        (None, _) => format!("حُذف نهائياً: {}، {}", files_ar(r.files), ltr(&human_size(r.bytes))),
+    };
+    if !r.skipped.is_empty() {
+        a.status += &format!("  ·  تُخطّي {} (مستخدم الآن أو بلا صلاحية)", files_ar(r.skipped.len() as u64));
+    }
+    // Gone: off the list now (the index catches up by itself).
+    if r.error.is_none() && !Path::new(&d.path).exists() {
+        a.items.retain(|it| it.path != d.path);
+        a.sel = a.sel.min(a.items.len().saturating_sub(1));
+        ensure_visible();
+    } else if let Some(it) = a.items.iter_mut().find(|it| it.path == d.path) {
+        it.size = it.size.map(|n| n.saturating_sub(r.bytes));
+    }
+    layout();
+    request_preview();
+    if !r.skipped.is_empty() {
+        let mut list: Vec<String> = r.skipped.iter().take(12).map(|s| ltr(s)).collect();
+        if r.skipped.len() > 12 {
+            list.push(format!("… و{} غيرها", r.skipped.len() - 12));
+        }
+        ask(&format!("{}
+
+تُخطّي ما يلي لأنه مستخدم الآن أو بلا صلاحية:
+{}", a.status, list.join("
+")), MB_OK | MB_ICONINFORMATION);
+    }
+}
 
 /// The right-click menu for result `i`: ours on top (open its location,
 /// copy its path), then the shell's own, as in Explorer. At the
@@ -1790,6 +1908,10 @@ fn context_menu(i: usize, at: Option<POINT>) {
         if is_dir {
             AppendMenuW(m, MF_STRING, CMD_USAGE as usize, usage.as_ptr());
         }
+        let del = w("حذف…	Delete");
+        if !a.items[i].app {
+            AppendMenuW(m, MF_STRING, CMD_DELETE as usize, del.as_ptr());
+        }
         AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
         // Shift+right-click: the extended items too, as in Explorer.
         let extended = GetKeyState(VK_SHIFT as i32) < 0;
@@ -1804,6 +1926,7 @@ fn context_menu(i: usize, at: Option<POINT>) {
                 a.sel = i;
                 usage_of_selection();
             }
+            CMD_DELETE => delete_item(i),
             id if id >= shell_menu::FIRST => {
                 if let Some(s) = &shell {
                     s.invoke(id, a.hwnd, pt.x, pt.y);
@@ -1934,6 +2057,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_PREVIEW => {
             on_preview(unsafe { Box::from_raw(lp as *mut Preview) });
+            0
+        }
+        WM_DELETED => {
+            on_deleted(unsafe { Box::from_raw(lp as *mut Deleted) });
             0
         }
         WM_RBUTTONUP => {
