@@ -78,6 +78,8 @@ struct Item {
     share: f32,
     /// An installed app: `path` is `shell:AppsFolder\<id>`.
     app: bool,
+    /// A known cache folder, or inside one: safe to delete.
+    cache: bool,
 }
 
 struct Answer {
@@ -106,6 +108,9 @@ struct Theme {
     sel: u32,
     line: u32,
     accent: u32,
+    /// The "safe to delete" tag: its text and its fill.
+    safe: u32,
+    safe_bg: u32,
 }
 
 /// COLORREF from 0xRRGGBB.
@@ -123,6 +128,8 @@ fn theme(light: bool) -> Theme {
             sel: rgb(0xE3EEFB),
             line: rgb(0xE5E5E5),
             accent: rgb(0x2563EB),
+            safe: rgb(0x166534),
+            safe_bg: rgb(0xDCFCE7),
         }
     } else {
         Theme {
@@ -133,6 +140,8 @@ fn theme(light: bool) -> Theme {
             sel: rgb(0x2E3A4B),
             line: rgb(0x333333),
             accent: rgb(0x4CC2FF),
+            safe: rgb(0x86EFAC),
+            safe_bg: rgb(0x173A26),
         }
     }
 }
@@ -475,7 +484,8 @@ fn item(path: &str, is_dir: bool) -> Item {
     let cut = path.rfind('\\').map_or(0, |i| i + 1);
     let (dir, name) = (path[..cut.saturating_sub(1).max(if cut == 3 { 3 } else { 0 })].to_string(), path[cut..].to_string());
     let dir = if dir.is_empty() { path[..cut].to_string() } else { dir };
-    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0, app: false }
+    let cache = qasd::clean::is_cache(&path);
+    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0, app: false, cache }
 }
 
 /// The Start menu's apps (Store and desktop alike), as (name, id): what
@@ -531,7 +541,7 @@ fn app_items(apps: &[(String, String)], q: &str) -> Vec<Item> {
     hits.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.0.len().cmp(&y.1.0.len())));
     hits.into_iter()
         .take(4)
-        .map(|(_, (name, id))| Item { path: format!("shell:AppsFolder\\{id}"), name: name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true })
+        .map(|(_, (name, id))| Item { path: format!("shell:AppsFolder\\{id}"), name: name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true, cache: false })
         .collect()
 }
 
@@ -722,7 +732,7 @@ fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
 fn history_items() -> Vec<Item> {
     history::load()
         .into_iter()
-        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0, app: false })
+        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0, app: false, cache: false })
         .collect()
 }
 
@@ -1364,10 +1374,25 @@ fn paint() {
                 draw_text(dc, &local_time(it.mtime), &mut s2, DT_RIGHT);
                 right -= col + scale(10);
             }
+            // A known cache: say it is safe to delete, at the end of the name line.
+            let mut name_right = right;
+            if it.cache {
+                SelectObject(dc, a.fonts.sub);
+                let label = "آمن للحذف";
+                let lw16: Vec<u16> = label.encode_utf16().collect();
+                let mut sz = SIZE { cx: 0, cy: 0 };
+                GetTextExtentPoint32W(dc, lw16.as_ptr(), lw16.len() as i32, &mut sz);
+                let tag = RECT { left: right - sz.cx - scale(16), top: y + scale(8), right, bottom: y + scale(26) };
+                round_fill(dc, &tag, t.safe_bg, scale(9));
+                SetTextColor(dc, t.safe);
+                let mut tr = tag;
+                draw_text(dc, label, &mut tr, DT_CENTER | DT_VCENTER | DT_RTLREADING);
+                name_right = tag.left - scale(8);
+            }
             // Name, then the folder.
             SelectObject(dc, a.fonts.name);
             SetTextColor(dc, t.text);
-            let mut r1 = RECT { left, top: y + scale(6), right, bottom: y + scale(27) };
+            let mut r1 = RECT { left, top: y + scale(6), right: name_right, bottom: y + scale(27) };
             draw_text(dc, &it.name, &mut r1, DT_LEFT | DT_END_ELLIPSIS);
             SelectObject(dc, a.fonts.sub);
             SetTextColor(dc, t.sub);
