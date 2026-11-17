@@ -1,4 +1,7 @@
-"""Draws assets/qasd.ico (and qasd.png): a magnifier on a blue rounded square.
+"""Draws assets/qasd.ico (and qasd.png): a bold Q on a blue rounded square,
+its tail cutting through the ring (the name's letter, and a lens), and the
+tray's one-colour versions: qasd-tray-dark.ico (white, for a dark taskbar)
+and qasd-tray-light.ico (black, for a light one).
 Pure Python, no dependencies: signed-distance shapes, 4x4 supersampling."""
 import math, struct, zlib, os
 
@@ -13,7 +16,17 @@ def sd_segment(px, py, ax, ay, bx, by):
     h = clamp((pax * bax + pay * bay) / (bax * bax + bay * bay))
     return math.hypot(pax - bax * h, pay - bay * h)
 
-def render(n):
+def q_mark(u, v, n):
+    """Inside the Q (ring with a gap around its tail, and the tail)?"""
+    w = .1 if n > 24 else .13
+    cx, cy, r = .48, .47, .215
+    tail = sd_segment(u, v, .57, .57, .77, .77) - w / 2
+    ring = abs(math.hypot(u - cx, v - cy) - r) - w / 2
+    ring = max(ring, -(tail - w * .55))
+    return min(ring, tail) < 0
+
+def render(n, tray=None):
+    """The app icon, or (tray = (r, g, b)) the bare Q in one colour, a bit larger."""
     ss = 4
     px = []
     for y in range(n):
@@ -24,18 +37,19 @@ def render(n):
                 for sx in range(ss):
                     u = (x + (sx + .5) / ss) / n  # 0..1
                     v = (y + (sy + .5) / ss) / n
-                    # background tile
-                    d = sd_round_rect(u, v, .5, .5, .46, .46, .22)
-                    if d > 0: continue
-                    t = clamp((u + v) / 2)
-                    c1, c2 = (37, 99, 235), (6, 182, 212)
-                    col = [c1[i] + (c2[i] - c1[i]) * t for i in range(3)]
-                    # magnifier: ring + handle (white)
-                    cx, cy, r, w = .44, .43, .19, .075 if n >= 32 else .095
-                    ring = abs(math.hypot(u - cx, v - cy) - r) - w / 2
-                    handle = sd_segment(u, v, cx + r * .72, cy + r * .72, .74, .73) - w * .62
-                    if min(ring, handle) < 0:
-                        col = [255, 255, 255]
+                    if tray:
+                        # No tile: the Q fills the square, as tray glyphs do.
+                        if not q_mark(.5 + (u - .5) * .78, .5 + (v - .5) * .78, n):
+                            continue
+                        col = list(tray)
+                    else:
+                        if sd_round_rect(u, v, .5, .5, .46, .46, .22) > 0:
+                            continue
+                        t = clamp((u + v) / 2)
+                        c1, c2 = (37, 99, 235), (6, 182, 212)
+                        col = [c1[i] + (c2[i] - c1[i]) * t for i in range(3)]
+                        if q_mark(u, v, n):
+                            col = [255, 255, 255]
                     for i in range(3): acc[i] += col[i]
                     acc[3] += 1
             k = ss * ss
@@ -54,14 +68,20 @@ def png(px):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", n, n, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
 
 here = os.path.dirname(os.path.abspath(__file__))
-sizes = [16, 20, 24, 32, 40, 48, 64, 256]
-imgs = [png(render(s)) for s in sizes]
-head = struct.pack("<HHH", 0, 1, len(sizes))
-off = 6 + 16 * len(sizes)
-dirs = b""
-for s, d in zip(sizes, imgs):
-    dirs += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(d), off)
-    off += len(d)
-open(os.path.join(here, "qasd.ico"), "wb").write(head + dirs + b"".join(imgs))
+
+def ico(name, sizes, tray=None):
+    imgs = [png(render(s, tray)) for s in sizes]
+    head = struct.pack("<HHH", 0, 1, len(sizes))
+    off = 6 + 16 * len(sizes)
+    dirs = b""
+    for s, d in zip(sizes, imgs):
+        dirs += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(d), off)
+        off += len(d)
+    open(os.path.join(here, name), "wb").write(head + dirs + b"".join(imgs))
+    return imgs
+
+imgs = ico("qasd.ico", [16, 20, 24, 32, 40, 48, 64, 256])
 open(os.path.join(here, "qasd.png"), "wb").write(imgs[-1])
+ico("qasd-tray-dark.ico", [16, 20, 24, 32, 40, 48], (255, 255, 255))
+ico("qasd-tray-light.ico", [16, 20, 24, 32, 40, 48], (28, 28, 28))
 print("ok")

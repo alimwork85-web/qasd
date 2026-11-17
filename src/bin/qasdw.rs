@@ -1918,6 +1918,31 @@ fn row_at(x: i32, y: i32) -> Option<usize> {
     (i < a.items.len() && i < a.top + MAX_ROWS).then_some(i)
 }
 
+/// The tray's one-colour Q for the taskbar's own theme (white on a dark
+/// taskbar, black on a light one); the app icon if those are missing.
+fn tray_glyph() -> HICON {
+    let key = w(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let val = w("SystemUsesLightTheme");
+    let (mut v, mut n) = (0u32, 4u32);
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), val.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&raw mut v).cast(), &mut n) };
+    let id = if v != 0 { 3 } else { 2 };
+    let (cx, cy) = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) };
+    let h = unsafe { LoadImageW(GetModuleHandleW(std::ptr::null()), id as _, IMAGE_ICON, cx, cy, LR_SHARED) } as HICON;
+    if h.is_null() { app().tray_icon } else { h }
+}
+
+/// A new tray glyph after a theme change.
+fn tray_update() {
+    let a = app();
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = a.hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON;
+    nid.hIcon = tray_glyph();
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+}
+
 fn tray(add: bool) {
     let a = app();
     let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
@@ -1926,7 +1951,7 @@ fn tray(add: bool) {
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = a.tray_icon;
+    nid.hIcon = tray_glyph();
     let tip = w("قصد — بحث سريع (Alt+Q)");
     nid.szTip[..tip.len().min(127)].copy_from_slice(&tip[..tip.len().min(127)]);
     unsafe { Shell_NotifyIconW(if add { NIM_ADD } else { NIM_DELETE }, &nid) };
@@ -2874,6 +2899,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_SETTINGCHANGE => {
+            tray_update();
             let light = system_light();
             if light != a.light {
                 a.light = light;

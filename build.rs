@@ -13,6 +13,8 @@ fn main() {
     let rc = |description: &str, internal: &str| format!(
         r#"#pragma code_page(65001)
 1 ICON "{icon}"
+2 ICON "{tray_dark}"
+3 ICON "{tray_light}"
 1 24 "{manifest}"
 1 VERSIONINFO
 FILEVERSION {v0},{v1},{v2},{v3}
@@ -43,6 +45,8 @@ BEGIN
 END
 "#,
         icon = path("qasd.ico"),
+        tray_dark = path("qasd-tray-dark.ico"),
+        tray_light = path("qasd-tray-light.ico"),
         manifest = path("qasd.manifest"),
         v0 = parts[0],
         v1 = parts[1],
@@ -51,6 +55,8 @@ END
     );
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     println!("cargo:rerun-if-changed=assets/qasd.ico");
+    println!("cargo:rerun-if-changed=assets/qasd-tray-dark.ico");
+    println!("cargo:rerun-if-changed=assets/qasd-tray-light.ico");
     println!("cargo:rerun-if-changed=assets/qasd.manifest");
     for (bin, description) in [("qasd", "Qasd - search service"), ("qasdw", "Qasd - search window")] {
         let out = out_dir.join(format!("{bin}.rc"));
