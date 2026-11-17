@@ -186,6 +186,8 @@ struct Fonts {
     input: HFONT,
     name: HFONT,
     sub: HFONT,
+    /// Arabic labels (chips, tags, footer): a size up, as Arabic reads smaller.
+    ui: HFONT,
     glyph: HFONT,
     /// The preview pane's close mark.
     glyph_small: HFONT,
@@ -201,11 +203,14 @@ fn font(px: i32, weight: i32, face: &str) -> HFONT {
 impl Fonts {
     fn new(dpi: u32) -> Fonts {
         let s = |px: i32| px * dpi as i32 / 96;
+        // Windows 11's own UI face for file names (Arabic falls back to Segoe UI).
+        let name_face = if Path::new(r"C:\Windows\Fonts\SegUIVar.ttf").exists() { "Segoe UI Variable Text" } else { "Segoe UI" };
         let glyph_face = if Path::new(r"C:\Windows\Fonts\SegoeIcons.ttf").exists() { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
         Fonts {
             input: font(s(20), 400, "Segoe UI"),
-            name: font(s(15), 600, "Segoe UI"),
+            name: font(s(15), 600, name_face),
             sub: font(s(12), 400, "Segoe UI"),
+            ui: font(s(13), 400, "Segoe UI"),
             glyph: font(s(18), 400, glyph_face),
             glyph_small: font(s(11), 400, glyph_face),
             mono: font(s(12), 400, "Consolas"),
@@ -216,6 +221,7 @@ impl Fonts {
             DeleteObject(self.input);
             DeleteObject(self.name);
             DeleteObject(self.sub);
+            DeleteObject(self.ui);
             DeleteObject(self.glyph);
             DeleteObject(self.glyph_small);
             DeleteObject(self.mono);
@@ -307,7 +313,7 @@ fn chip_rects() -> Vec<RECT> {
     let mut out = Vec::new();
     unsafe {
         let dc = GetDC(a.hwnd);
-        let old = SelectObject(dc, a.fonts.sub);
+        let old = SelectObject(dc, a.fonts.ui);
         for (label, _) in CHIPS {
             let t: Vec<u16> = label.encode_utf16().collect();
             let mut sz = SIZE { cx: 0, cy: 0 };
@@ -1283,6 +1289,72 @@ fn draw_text(dc: HDC, s: &str, r: &mut RECT, flags: u32) {
     unsafe { DrawTextW(dc, ws.as_ptr(), ws.len() as i32 - 1, r, flags | DT_NOPREFIX | DT_SINGLELINE) };
 }
 
+/// Where the query's plain words show in `name` (UTF-16 ranges, merged).
+/// Filters (`type:`, `size:>1gb`, ...) and words found only by spelling or layout fixes mark nothing.
+fn matches(name: &[u16], query: &str) -> Vec<(usize, usize)> {
+    let low: Vec<u16> = String::from_utf16_lossy(name).to_lowercase().encode_utf16().collect();
+    if low.len() != name.len() {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for word in query.split_whitespace().filter(|q| !q.contains(':') && !q.starts_with('-')) {
+        let wl: Vec<u16> = word.trim_matches(['"', '*', '?']).to_lowercase().encode_utf16().collect();
+        if wl.is_empty() {
+            continue;
+        }
+        if let Some(i) = low.windows(wl.len()).position(|win| win == wl.as_slice()) {
+            out.push((i, i + wl.len()));
+        }
+    }
+    out.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in out {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
+/// A result's name, the part the query matched in the accent color.
+/// Right-to-left names and names that don't fit are drawn plain (split
+/// pieces would break Arabic joining and the ellipsis).
+fn draw_name(dc: HDC, name: &str, mut r: RECT, query: &str, color: u32, accent: u32) {
+    let ws: Vec<u16> = name.encode_utf16().collect();
+    let rtl = name.chars().any(|c| matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF));
+    let marks = if rtl { Vec::new() } else { matches(&ws, query) };
+    let mut sz = SIZE { cx: 0, cy: 0 };
+    unsafe { GetTextExtentPoint32W(dc, ws.as_ptr(), ws.len() as i32, &mut sz) };
+    unsafe { SetTextColor(dc, color) };
+    if marks.is_empty() || sz.cx > r.right - r.left {
+        draw_text(dc, name, &mut r, DT_LEFT | DT_END_ELLIPSIS);
+        return;
+    }
+    let mut x = r.left;
+    let mut at = 0;
+    let piece = |from: usize, to: usize, c: u32, x: &mut i32| {
+        if from >= to {
+            return;
+        }
+        let part = &ws[from..to];
+        unsafe {
+            SetTextColor(dc, c);
+            let mut pr = RECT { left: *x, top: r.top, right: r.right, bottom: r.bottom };
+            DrawTextW(dc, part.as_ptr(), part.len() as i32, &mut pr, DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
+            let mut ps = SIZE { cx: 0, cy: 0 };
+            GetTextExtentPoint32W(dc, part.as_ptr(), part.len() as i32, &mut ps);
+            *x += ps.cx;
+        }
+    };
+    for &(a, b) in &marks {
+        piece(at, a, color, &mut x);
+        piece(a, b, accent, &mut x);
+        at = b;
+    }
+    piece(at, ws.len(), color, &mut x);
+}
+
 fn fill(dc: HDC, r: &RECT, color: u32) {
     unsafe {
         let b = CreateSolidBrush(color);
@@ -1405,7 +1477,7 @@ fn paint() {
 
         // The ready-made searches, while the box is empty.
         if chips_shown() {
-            SelectObject(dc, a.fonts.sub);
+            SelectObject(dc, a.fonts.ui);
             for (i, r) in chip_rects().iter().enumerate() {
                 let lit = a.hover_btn == Some(Btn::Chip(i));
                 round_fill(dc, r, if lit { t.sel } else { t.chip }, PILL);
@@ -1476,7 +1548,7 @@ fn paint() {
             // A known cache: say it is safe to delete, at the end of the name line.
             let mut name_right = right;
             if it.cache {
-                SelectObject(dc, a.fonts.sub);
+                SelectObject(dc, a.fonts.ui);
                 let label = "آمن للحذف";
                 let lw16: Vec<u16> = label.encode_utf16().collect();
                 let mut sz = SIZE { cx: 0, cy: 0 };
@@ -1491,8 +1563,8 @@ fn paint() {
             // Name, then the folder.
             SelectObject(dc, a.fonts.name);
             SetTextColor(dc, t.text);
-            let mut r1 = RECT { left, top: y + scale(6), right: name_right, bottom: y + scale(27) };
-            draw_text(dc, &it.name, &mut r1, DT_LEFT | DT_END_ELLIPSIS);
+            let r1 = RECT { left, top: y + scale(6), right: name_right, bottom: y + scale(27) };
+            draw_name(dc, &it.name, r1, &a.query, t.text, t.accent);
             SelectObject(dc, a.fonts.sub);
             SetTextColor(dc, t.sub);
             let mut r2 = RECT { left, top: y + scale(27), right, bottom: y + scale(45) };
@@ -1520,7 +1592,7 @@ fn paint() {
         let has_foot = !(a.query.trim().is_empty() && a.items.is_empty());
         if has_foot {
             fill(dc, &RECT { left: 0, top: fy, right: cw, bottom: fy + 1 }, t.line);
-            SelectObject(dc, a.fonts.sub);
+            SelectObject(dc, a.fonts.ui);
             SetTextColor(dc, t.sub);
             let mut fr = RECT { left: scale(16), top: fy, right: cw - scale(16), bottom: ch };
             draw_text(dc, &a.status, &mut fr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
