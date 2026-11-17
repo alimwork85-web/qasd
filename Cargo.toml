@@ -62,6 +62,7 @@ features = [
   "Win32_UI_Shell_Common",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
+  "Win32_Graphics_GdiPlus",
   "Win32_System_Time",
 ]
 

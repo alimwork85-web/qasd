@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::Graphics::GdiPlus as gdip;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -1271,15 +1272,68 @@ fn fill(dc: HDC, r: &RECT, color: u32) {
     }
 }
 
+/// A rounded rectangle path for GDI+ (`d`: the corners' diameter).
+unsafe fn round_path(r: &RECT, d: i32) -> *mut gdip::GpPath {
+    let (x, y, w, h) = (r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32);
+    let d = (d as f32).min(w).min(h).max(0.0);
+    let mut path = std::ptr::null_mut();
+    unsafe {
+        gdip::GdipCreatePath(gdip::FillModeAlternate, &mut path);
+        if d < 1.0 {
+            gdip::GdipAddPathRectangle(path, x, y, w, h);
+        } else {
+            gdip::GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+            gdip::GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+            gdip::GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+            gdip::GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+        }
+        gdip::GdipClosePathFigure(path);
+    }
+    path
+}
+
+/// GDI+ on `dc`, smoothed (GDI's RoundRect has jagged corners).
+unsafe fn smooth(dc: HDC) -> *mut gdip::GpGraphics {
+    let mut g = std::ptr::null_mut();
+    unsafe {
+        gdip::GdipCreateFromHDC(dc, &mut g);
+        gdip::GdipSetSmoothingMode(g, gdip::SmoothingModeAntiAlias);
+        gdip::GdipSetPixelOffsetMode(g, gdip::PixelOffsetModeHalf);
+    }
+    g
+}
+
+/// COLORREF to GDI+'s opaque ARGB.
+fn argb(c: u32) -> u32 {
+    0xFF00_0000 | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+}
+
+/// A filled rounded rectangle with smooth corners (`radius`: the corners' diameter).
 fn round_fill(dc: HDC, r: &RECT, color: u32, radius: i32) {
     unsafe {
-        let b = CreateSolidBrush(color);
-        let ob = SelectObject(dc, b);
-        let op = SelectObject(dc, GetStockObject(NULL_PEN));
-        RoundRect(dc, r.left, r.top, r.right + 1, r.bottom + 1, radius, radius);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(b);
+        let g = smooth(dc);
+        let mut b = std::ptr::null_mut();
+        gdip::GdipCreateSolidFill(argb(color), &mut b);
+        let p = round_path(r, radius);
+        gdip::GdipFillPath(g, b.cast(), p);
+        gdip::GdipDeletePath(p);
+        gdip::GdipDeleteBrush(b.cast());
+        gdip::GdipDeleteGraphics(g);
+    }
+}
+
+/// A 1px rounded outline, inside `r`.
+fn round_stroke(dc: HDC, r: &RECT, color: u32, radius: i32) {
+    unsafe {
+        let g = smooth(dc);
+        let mut pen = std::ptr::null_mut();
+        gdip::GdipCreatePen1(argb(color), 1.0, gdip::UnitPixel, &mut pen);
+        let inner = RECT { left: r.left, top: r.top, right: r.right - 1, bottom: r.bottom - 1 };
+        let p = round_path(&inner, radius);
+        gdip::GdipDrawPath(g, pen, p);
+        gdip::GdipDeletePath(p);
+        gdip::GdipDeletePen(pen);
+        gdip::GdipDeleteGraphics(g);
     }
 }
 
@@ -2311,6 +2365,10 @@ fn main() {
         let _ = qasd::pipe::connect_or_start(&data_dir(), &daemon_exe());
         return;
     }
+    // GDI+ for the smooth shapes (kept for the process's life).
+    let mut token = 0usize;
+    let input = gdip::GdiplusStartupInput { GdiplusVersion: 1, DebugEventCallback: 0, SuppressBackgroundThread: 0, SuppressExternalCodecs: 0 };
+    unsafe { gdip::GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
     // OLE, not just COM: the shell's "Copy" puts a data object on the clipboard.
     let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None) };
     let class = w(CLASS);
