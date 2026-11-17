@@ -76,6 +76,8 @@ struct Item {
     history: bool,
     /// Disk usage view: this row's part of its folder (0..1).
     share: f32,
+    /// An installed app: `path` is `shell:AppsFolder\<id>`.
+    app: bool,
 }
 
 struct Answer {
@@ -306,6 +308,7 @@ fn daemon_exe() -> PathBuf {
 }
 
 fn worker(jobs: Receiver<Job>, hwnd: usize) {
+    let (mut apps, mut apps_at) = (Vec::new(), None);
     let mut conn: Option<(Conn, BufReader<Conn>)> = None;
     let mut ask = |req: &Value| -> Result<Value, String> {
         for attempt in 0..2 {
@@ -331,6 +334,8 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
         match job {
             Job::Warm => {
                 let _ = ask(&json!({"op": "status"}));
+                apps = list_apps();
+                apps_at = Some(Instant::now());
             }
             Job::Opened(p) => {
                 let _ = ask(&json!({"op": "open", "path": p}));
@@ -369,8 +374,20 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
                 let t = Instant::now();
                 let mut a = Answer { seq, items: Vec::new(), error: None, took: Duration::ZERO, usage: None };
                 if !q.trim().is_empty() {
+                    // shortcut: re-listed at most once a minute; an app installed just now shows within a minute.
+                    if apps_at.is_none_or(|t: Instant| t.elapsed() > Duration::from_secs(60)) {
+                        apps = list_apps();
+                        apps_at = Some(Instant::now());
+                    }
                     match ask(&json!({"q": q, "limit": LIMIT, "boost": true, "cwd": sys::home()})) {
-                        Ok(v) if v["ok"] == true => a.items = items(&v),
+                        Ok(v) if v["ok"] == true => {
+                            let found = app_items(&apps, &q);
+                            let mut files = items(&v);
+                            // An app's own Start menu shortcut would show twice.
+                            files.retain(|f| !(f.name.to_lowercase().ends_with(".lnk") && found.iter().any(|x| f.name[..f.name.len() - 4].eq_ignore_ascii_case(&x.name))));
+                            a.items = found;
+                            a.items.extend(files);
+                        }
                         Ok(v) => a.error = Some(v["error"].as_str().unwrap_or("error").to_string()),
                         Err(e) => a.error = Some(e),
                     }
@@ -390,7 +407,64 @@ fn item(path: &str, is_dir: bool) -> Item {
     let cut = path.rfind('\\').map_or(0, |i| i + 1);
     let (dir, name) = (path[..cut.saturating_sub(1).max(if cut == 3 { 3 } else { 0 })].to_string(), path[cut..].to_string());
     let dir = if dir.is_empty() { path[..cut].to_string() } else { dir };
-    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0 }
+    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0, app: false }
+}
+
+/// The Start menu's apps (Store and desktop alike), as (name, id): what
+/// `shell:AppsFolder` lists, in the language Windows shows.
+fn list_apps() -> Vec<(String, String)> {
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING};
+    let name = |it: &IShellItem, k: SIGDN| unsafe {
+        let p = it.GetDisplayName(k).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as _));
+        s
+    };
+    let mut out = Vec::new();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(folder) = SHGetKnownFolderItem::<_, IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None) else { return out };
+        let Ok(list) = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else { return out };
+        loop {
+            let mut one = [None];
+            let mut n = 0;
+            if list.Next(&mut one, Some(&mut n)).is_err() || n == 0 {
+                break;
+            }
+            let Some(it) = one[0].take() else { break };
+            if let (Some(shown), Some(id)) = (name(&it, SIGDN_NORMALDISPLAY), name(&it, SIGDN_PARENTRELATIVEPARSING)) {
+                // Some names carry direction marks ("\u{200e}الرسام").
+                let shown: String = shown.chars().filter(|c| !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}')).collect();
+                out.push((shown.trim().to_string(), id));
+            }
+        }
+    }
+    out
+}
+
+/// The apps whose names `q` finds, best first (at most 4).
+fn app_items(apps: &[(String, String)], q: &str) -> Vec<Item> {
+    let Ok(query) = qasd::Query::parse(q, &sys::home()) else { return Vec::new() };
+    // The words as typed, their other Arabic spellings (ة/ه, أ/ا...) and the other keyboard layout.
+    let mut forms = vec![query.tokens.clone()];
+    forms.extend(query.alt.iter().cloned());
+    if !query.layout.is_empty() {
+        forms.push(query.layout.clone());
+    }
+    let forms: Vec<qasd::Query> = forms.into_iter().map(|tokens| qasd::Query { tokens, alt: Vec::new(), layout: Vec::new(), ..query.clone() }).collect();
+    let mut hits: Vec<(i32, &(String, String))> = apps
+        .iter()
+        .filter_map(|a| {
+            let p = format!("/{}", a.0);
+            forms.iter().filter_map(|f| f.match_path(p.as_bytes(), qasd::walk::KIND_FILE, 0, 0)).max().map(|s| (s, a))
+        })
+        .collect();
+    hits.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.0.len().cmp(&y.1.0.len())));
+    hits.into_iter()
+        .take(4)
+        .map(|(_, (name, id))| Item { path: format!("shell:AppsFolder\\{id}"), name: name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true })
+        .collect()
 }
 
 fn items(v: &Value) -> Vec<Item> {
@@ -580,7 +654,7 @@ fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
 fn history_items() -> Vec<Item> {
     history::load()
         .into_iter()
-        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0 })
+        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0, app: false })
         .collect()
 }
 
@@ -933,7 +1007,9 @@ fn open(i: usize, reveal: bool) {
         }
     }
     // Ranked higher next time ("boost"), and the search remembered.
-    let _ = a.jobs.send(Job::Opened(it.path.clone()));
+    if !it.app {
+        let _ = a.jobs.send(Job::Opened(it.path.clone()));
+    }
     history::remember(&a.query);
     hide();
 }
@@ -1030,7 +1106,7 @@ fn icon_index(it: &Item) -> i32 {
     let own = matches!(ext.as_str(), "exe" | "lnk" | "ico" | "url" | "appref-ms");
     let key = if it.is_dir {
         "<dir>".to_string()
-    } else if own {
+    } else if own || it.app {
         it.path.clone()
     } else {
         format!(".{ext}")
@@ -1039,6 +1115,24 @@ fn icon_index(it: &Item) -> i32 {
         return i;
     }
     let mut fi: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    if it.app {
+        // A shell item, not a file: its icon by its item id list.
+        let mut i = -1;
+        let mut pidl = std::ptr::null_mut();
+        let p = w(&it.path);
+        if unsafe { SHParseDisplayName(p.as_ptr(), std::ptr::null_mut(), &mut pidl, 0, std::ptr::null_mut()) } == 0 && !pidl.is_null() {
+            let list = unsafe { SHGetFileInfoW(pidl as *const u16, 0, &mut fi, size_of::<SHFILEINFOW>() as u32, SHGFI_SYSICONINDEX | SHGFI_PIDL) };
+            unsafe { ILFree(pidl) };
+            if list != 0 {
+                if a.images == 0 {
+                    a.images = list as HIMAGELIST;
+                }
+                i = fi.iIcon;
+            }
+        }
+        a.icons.insert(key, i);
+        return i;
+    }
     let (p, attrs, flags) = if own {
         (w(&it.path), 0, SHGFI_SYSICONINDEX)
     } else if it.is_dir {
