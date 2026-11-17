@@ -7,7 +7,6 @@
 
 pub mod alloc;
 pub mod content;
-pub mod docs;
 pub mod dupes;
 mod engine;
 mod fsevents;

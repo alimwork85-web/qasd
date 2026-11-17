@@ -62,7 +62,6 @@ fn main() {
             Ok(()) => println!("stopped"),
             Err(e) => die(&e),
         },
-        Some("doc-text") if args.len() == 2 => qasd::docs::main(&args[1]),
         Some("bench") => bench(&args[1..].join(" ")),
         Some("install") => install(args.iter().any(|a| a == "--login")),
         Some("uninstall") => uninstall(args.iter().any(|a| a == "--purge")),

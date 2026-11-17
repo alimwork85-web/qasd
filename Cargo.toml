@@ -18,8 +18,6 @@ serde_json = "1"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 unicode-normalization = "0.1"
-pdf_oxide = { version = "0.3.78", default-features = false }
-office_oxide = { version = "0.1.17", default-features = false }
 
 # COM (the shell's context menu) for the search window.
 [dependencies.windows]
