@@ -13,6 +13,7 @@ pub mod index;
 pub mod live;
 pub mod mft;
 pub mod pipe;
+pub mod programs;
 pub mod query;
 pub mod sys;
 pub mod usn;

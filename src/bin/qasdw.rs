@@ -47,6 +47,8 @@ const WM_SHOW_ME: u32 = WM_APP + 3;
 const WM_PREVIEW: u32 = WM_APP + 4;
 /// A deletion finished (lparam: Box<Deleted>).
 const WM_DELETED: u32 = WM_APP + 5;
+/// An uninstaller finished (lparam: Box<Uninstalled>).
+const WM_UNINSTALLED: u32 = WM_APP + 6;
 const TIMER_RETRY: usize = 1;
 const LIMIT: usize = 60;
 const MAX_ROWS: usize = 8;
@@ -82,6 +84,8 @@ struct Item {
     app: bool,
     /// A known cache folder, or inside one: safe to delete.
     cache: bool,
+    /// An installed program (`app:`): `path` is its icon file.
+    program: Option<Box<qasd::programs::Program>>,
 }
 
 struct Answer {
@@ -262,6 +266,7 @@ const CHIPS: &[(&str, &str)] = &[
     ("مستندات هذا الأسبوع", "type:doc mtime:<7d"),
     ("ملفات كبيرة", "size:>1gb"),
     ("ملفات مكررة", "dupe:"),
+    ("البرامج المثبتة", "app:"),
 ];
 /// The strip of CHIPS, under the search box (96 DPI).
 const CHIPS_H: i32 = 40;
@@ -269,7 +274,7 @@ const CHIPS_H: i32 = 40;
 /// The chips show while the box is empty (and not in the disk usage view).
 fn chips_shown() -> bool {
     let a = app();
-    a.usage.is_none() && a.query.trim().is_empty()
+    a.usage.is_none() && a.query.trim().is_empty() && a.items.iter().all(|it| it.history)
 }
 
 /// Where the results start: under the search box, and the chips if shown.
@@ -388,6 +393,7 @@ fn daemon_exe() -> PathBuf {
 
 fn worker(jobs: Receiver<Job>, hwnd: usize) {
     let (mut apps, mut apps_at) = (Vec::new(), None);
+    let (mut progs, mut progs_at): (Vec<qasd::programs::Program>, Option<Instant>) = (Vec::new(), None);
     let mut conn: Option<(Conn, BufReader<Conn>)> = None;
     let mut ask = |req: &Value| -> Result<Value, String> {
         for attempt in 0..2 {
@@ -452,7 +458,14 @@ fn worker(jobs: Receiver<Job>, hwnd: usize) {
                 }
                 let t = Instant::now();
                 let mut a = Answer { seq, items: Vec::new(), error: None, took: Duration::ZERO, usage: None };
-                if !q.trim().is_empty() {
+                if let Some(rest) = programs_query(&q) {
+                    // Re-read after a few seconds: one may have just been removed.
+                    if progs_at.is_none_or(|t: Instant| t.elapsed() > Duration::from_secs(5)) {
+                        progs = qasd::programs::list();
+                        progs_at = Some(Instant::now());
+                    }
+                    a.items = program_items(&progs, rest);
+                } else if !q.trim().is_empty() {
                     // shortcut: re-listed at most once a minute; an app installed just now shows within a minute.
                     if apps_at.is_none_or(|t: Instant| t.elapsed() > Duration::from_secs(60)) {
                         apps = list_apps();
@@ -487,7 +500,7 @@ fn item(path: &str, is_dir: bool) -> Item {
     let (dir, name) = (path[..cut.saturating_sub(1).max(if cut == 3 { 3 } else { 0 })].to_string(), path[cut..].to_string());
     let dir = if dir.is_empty() { path[..cut].to_string() } else { dir };
     let cache = qasd::clean::is_cache(&path);
-    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0, app: false, cache }
+    Item { name: if name.is_empty() { path.clone() } else { name }, dir, path, is_dir, size: None, mtime: 0, history: false, share: 0.0, app: false, cache, program: None }
 }
 
 /// The Start menu's apps (Store and desktop alike), as (name, id): what
@@ -523,6 +536,49 @@ fn list_apps() -> Vec<(String, String)> {
     out
 }
 
+/// `app: words`: the installed programs (the words narrow them).
+fn programs_query(q: &str) -> Option<&str> {
+    let t = q.trim_start();
+    (t.len() >= 4 && t[..4].eq_ignore_ascii_case("app:")).then(|| t[4..].trim())
+}
+
+/// The installed programs `q` finds (all of them for no words), best first.
+fn program_items(progs: &[qasd::programs::Program], q: &str) -> Vec<Item> {
+    let names: Vec<&str> = progs.iter().map(|p| p.name.as_str()).collect();
+    let order: Vec<usize> = if q.is_empty() { (0..progs.len()).collect() } else { rank_names(&names, q) };
+    order
+        .into_iter()
+        .map(|i| {
+            let p = &progs[i];
+            let dir = [p.publisher.as_str(), p.version.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ·  ");
+            let path = p.icon.clone().or_else(|| p.location.clone()).unwrap_or_default();
+            Item { path, name: p.name.clone(), dir, is_dir: false, size: p.size, mtime: 0, history: false, share: 0.0, app: false, cache: false, program: Some(Box::new(p.clone())) }
+        })
+        .collect()
+}
+
+/// Indexes of the names `q` finds, best first: the words as typed, their
+/// other Arabic spellings (ة/ه, أ/ا...) and the other keyboard layout.
+fn rank_names(names: &[&str], q: &str) -> Vec<usize> {
+    let Ok(query) = qasd::Query::parse(q, &sys::home()) else { return Vec::new() };
+    let mut forms = vec![query.tokens.clone()];
+    forms.extend(query.alt.iter().cloned());
+    if !query.layout.is_empty() {
+        forms.push(query.layout.clone());
+    }
+    let forms: Vec<qasd::Query> = forms.into_iter().map(|tokens| qasd::Query { tokens, alt: Vec::new(), layout: Vec::new(), ..query.clone() }).collect();
+    let mut hits: Vec<(i32, usize)> = names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            let p = format!("/{n}");
+            forms.iter().filter_map(|f| f.match_path(p.as_bytes(), qasd::walk::KIND_FILE, 0, 0)).max().map(|s| (s, i))
+        })
+        .collect();
+    hits.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| names[x.1].len().cmp(&names[y.1].len())));
+    hits.into_iter().map(|(_, i)| i).collect()
+}
+
 /// The apps whose names `q` finds, best first (at most 4).
 fn app_items(apps: &[(String, String)], q: &str) -> Vec<Item> {
     let Ok(query) = qasd::Query::parse(q, &sys::home()) else { return Vec::new() };
@@ -543,7 +599,7 @@ fn app_items(apps: &[(String, String)], q: &str) -> Vec<Item> {
     hits.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.0.len().cmp(&y.1.0.len())));
     hits.into_iter()
         .take(4)
-        .map(|(_, (name, id))| Item { path: format!("shell:AppsFolder\\{id}"), name: name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true, cache: false })
+        .map(|(_, (name, id))| Item { path: format!("shell:AppsFolder\\{id}"), name: name.clone(), dir: "تطبيق".into(), is_dir: false, size: None, mtime: 0, history: false, share: 0.0, app: true, cache: false, program: None })
         .collect()
 }
 
@@ -734,7 +790,7 @@ fn preview_thread(rx: Receiver<(u64, String, bool, i32)>, hwnd: usize) {
 fn history_items() -> Vec<Item> {
     history::load()
         .into_iter()
-        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0, app: false, cache: false })
+        .map(|q| Item { path: String::new(), name: q, dir: String::new(), is_dir: false, size: None, mtime: 0, history: true, share: 0.0, app: false, cache: false, program: None })
         .collect()
 }
 
@@ -763,7 +819,7 @@ fn rows_shown() -> usize {
 /// The preview pane shows: wanted, and a file (not a past search) selected.
 fn previewing() -> bool {
     let a = app();
-    a.preview_on && a.items.get(a.sel).is_some_and(|it| !it.history)
+    a.preview_on && a.items.get(a.sel).is_some_and(|it| !it.history && it.program.is_none())
 }
 
 fn total_width() -> i32 {
@@ -953,6 +1009,10 @@ fn on_results(mut ans: Box<Answer>) {
             a.items = history_items();
             a.status = if a.items.is_empty() { String::new() } else { "عمليات البحث الأخيرة".into() };
         }
+        None if programs_query(&a.query).is_some() => {
+            a.items = ans.items;
+            a.status = format!("{}  ·  تطبيقات المتجر لا تظهر هنا: أزلها من إعدادات Windows", programs_ar(a.items.len()));
+        }
         None => {
             a.items = ans.items;
             a.status = format!("{}  ·  {}", results_ar(a.items.len()), ltr(&format!("{:.1} ms", ans.took.as_secs_f64() * 1000.0)));
@@ -969,6 +1029,17 @@ fn on_results(mut ans: Box<Answer>) {
 /// draws the newer isolates LRI/PDI as boxes).
 fn ltr(s: &str) -> String {
     format!("\u{202A}{s}\u{202C}")
+}
+
+/// "3 برامج": Arabic counted nouns, Western digits.
+fn programs_ar(n: usize) -> String {
+    match n {
+        0 => "لا برامج".into(),
+        1 => "برنامج واحد".into(),
+        2 => "برنامجان".into(),
+        3..=10 => format!("{n} برامج"),
+        _ => format!("{n} برنامجاً"),
+    }
 }
 
 /// "3 عناصر": Arabic counted nouns, Western digits.
@@ -1073,7 +1144,16 @@ fn open(i: usize, reveal: bool) {
         open_usage(String::from_utf8_lossy(&sys::from_user(&it.path)).into_owned());
         return;
     }
-    let p = w(&it.path);
+    // A program: where it is installed (never run it from here).
+    let (path, reveal) = match &it.program {
+        Some(p) => match p.location.as_ref().filter(|l| Path::new(l).is_dir()) {
+            Some(l) => (l.clone(), false),
+            None if Path::new(&it.path).exists() => (it.path.clone(), true),
+            None => return,
+        },
+        None => (it.path.clone(), reveal),
+    };
+    let p = w(&path);
     unsafe {
         if reveal {
             let pidl = ILCreateFromPathW(p.as_ptr());
@@ -1087,7 +1167,7 @@ fn open(i: usize, reveal: bool) {
         }
     }
     // Ranked higher next time ("boost"), and the search remembered.
-    if !it.app {
+    if !it.app && it.program.is_none() {
         let _ = a.jobs.send(Job::Opened(it.path.clone()));
     }
     history::remember(&a.query);
@@ -1164,6 +1244,7 @@ fn key(vk: u32) -> bool {
             search();
         }
         // Delete on a result: only with nothing after the caret to delete in the box.
+        VK_DELETE if a.items.get(a.sel).is_some_and(|it| it.program.is_some()) && caret_at_end() => uninstall(a.sel),
         VK_DELETE if a.items.get(a.sel).is_some_and(|it| !it.history && !it.app) && caret_at_end() => delete_item(a.sel),
         k if ctrl && k == b'P' as u16 => toggle_preview(),
         VK_APPS => context_menu(a.sel, None),
@@ -1192,7 +1273,12 @@ fn selection_in_edit() -> bool {
 fn icon_index(it: &Item) -> i32 {
     let a = app();
     let ext = it.name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
-    let own = matches!(ext.as_str(), "exe" | "lnk" | "ico" | "url" | "appref-ms");
+    let prog_icon = it.program.is_some() && {
+        let l = it.path.to_lowercase();
+        (l.ends_with(".exe") || l.ends_with(".ico")) && Path::new(&it.path).exists()
+    };
+    let ext = if it.program.is_some() && !prog_icon { "exe".to_string() } else { ext };
+    let own = prog_icon || (it.program.is_none() && matches!(ext.as_str(), "exe" | "lnk" | "ico" | "url" | "appref-ms"));
     let key = if it.is_dir {
         "<dir>".to_string()
     } else if own || it.app {
@@ -1438,6 +1524,8 @@ fn paint() {
             draw_text(dc, &a.status, &mut fr, DT_RIGHT | DT_VCENTER | DT_RTLREADING | DT_END_ELLIPSIS);
             let hints = if a.usage.is_some() {
                 "Enter فتح المجلد   ·   Backspace للأعلى   ·   Delete حذف   ·   Esc رجوع للبحث"
+            } else if a.items.get(a.sel).is_some_and(|it| it.program.is_some()) {
+                "Delete إزالة البرنامج   ·   Enter مجلد التثبيت"
             } else if a.items.get(a.sel).is_some_and(|it| it.history) {
                 "Enter للبحث   ·   Delete للحذف من السجل"
             } else if !a.items.is_empty() {
@@ -1760,7 +1848,7 @@ mod shell_menu {
 /// Drag result `i` to another program (a mail, an editor, a folder).
 fn start_drag(i: usize) {
     let a = app();
-    let Some(path) = a.items.get(i).filter(|it| !it.history).map(|it| it.path.clone()) else { return };
+    let Some(path) = a.items.get(i).filter(|it| !it.history && it.program.is_none()).map(|it| it.path.clone()) else { return };
     // The target gets focus while dropping: don't hide meanwhile.
     a.menu_up = true;
     let took = shell_menu::drag(&path, a.hwnd);
@@ -1846,6 +1934,133 @@ fn delete_item(i: usize) {
     });
 }
 
+/// What an uninstaller did, for the window.
+struct Uninstalled {
+    name: String,
+    /// It is gone from the installed programs.
+    gone: bool,
+    /// The folders it may have left (only when gone), with their sizes.
+    leftovers: Vec<(String, u64)>,
+}
+
+/// A folder's size, not following links (leftovers are small; capped).
+fn dir_size(p: &Path) -> u64 {
+    let (mut total, mut stack, mut seen) = (0u64, vec![p.to_path_buf()], 0u32);
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            seen += 1;
+            if seen > 200_000 {
+                return total;
+            }
+            let Ok(md) = std::fs::symlink_metadata(e.path()) else { continue };
+            if md.is_dir() {
+                stack.push(e.path());
+            } else if md.is_file() {
+                total += md.len();
+            }
+        }
+    }
+    total
+}
+
+/// Remove program `i` with its own uninstaller (as Windows' settings do),
+/// then show what it may have left behind, for the person to pick from.
+fn uninstall(i: usize) {
+    use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    let a = app();
+    let Some(p) = a.items.get(i).and_then(|it| it.program.clone()) else { return };
+    let publisher = if p.publisher.is_empty() { String::new() } else { format!("\nالناشر: {}", p.publisher) };
+    let text = format!("إزالة «{}»؟{publisher}\n\nسيعمل مزيل البرنامج الرسمي، كما في إعدادات Windows. بعد انتهائه يعرض قصد ما قد يبقى منه لتختار ما تحذفه.", p.name);
+    if ask(&text, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES {
+        return;
+    }
+    let (file, args) = qasd::programs::split_command(&p.uninstall);
+    let (file, args, verb) = (w(&file), w(&args), w("open"));
+    let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    sei.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.hwnd = a.hwnd;
+    sei.lpVerb = verb.as_ptr();
+    sei.lpFile = file.as_ptr();
+    sei.lpParameters = args.as_ptr();
+    sei.nShow = SW_SHOWNORMAL;
+    a.menu_up = true;
+    let ok = unsafe { ShellExecuteExW(&mut sei) } != 0;
+    a.menu_up = false;
+    if !ok {
+        a.status = format!("لم يعمل مزيل «{}» (أُلغي أو لم يُعثر عليه)", p.name);
+        unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
+        return;
+    }
+    hide();
+    let (hw, process) = (a.hwnd as usize, sei.hProcess as usize);
+    std::thread::spawn(move || {
+        if process != 0 {
+            unsafe {
+                WaitForSingleObject(process as HANDLE, INFINITE);
+                CloseHandle(process as HANDLE);
+            }
+        }
+        // Some uninstallers hand over to a copy of themselves and exit:
+        // wait (up to 5 minutes) for the program to leave the list.
+        let start = Instant::now();
+        let mut gone = !qasd::programs::installed(&p.key);
+        while !gone && start.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_secs(2));
+            gone = !qasd::programs::installed(&p.key);
+        }
+        let leftovers = if gone { qasd::programs::leftovers(&p).into_iter().map(|f| (dir_size(Path::new(&f)), f)).map(|(n, f)| (f, n)).collect() } else { Vec::new() };
+        let u = Box::into_raw(Box::new(Uninstalled { name: p.name.clone(), gone, leftovers }));
+        if unsafe { PostMessageW(hw as HWND, WM_UNINSTALLED, 0, u as isize) } == 0 {
+            drop(unsafe { Box::from_raw(u) });
+        }
+    });
+}
+
+/// Back after an uninstaller: the leftovers as rows (Delete sends one
+/// to the Recycle Bin, after asking), or why there are none.
+fn on_uninstalled(u: Box<Uninstalled>) {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    let a = app();
+    // Another program is in front now, and Windows won't let a background
+    // one take its place: share its input state for the moment we show.
+    unsafe {
+        let (me, them) = (GetCurrentThreadId(), GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut()));
+        let joined = them != 0 && them != me && AttachThreadInput(me, them, 1) != 0;
+        show();
+        if joined {
+            AttachThreadInput(me, them, 0);
+        }
+    }
+    // Not the search show() asked for: these rows instead, under an
+    // empty box (so Delete acts on a row).
+    a.quiet = true;
+    unsafe { SetWindowTextW(a.edit, w("").as_ptr()) };
+    a.quiet = false;
+    a.query.clear();
+    a.seq += 1;
+    LATEST.store(a.seq, Ordering::Relaxed);
+    a.items = u
+        .leftovers
+        .iter()
+        .map(|(f, n)| {
+            let mut it = item(&String::from_utf8_lossy(&sys::from_user(f)), true);
+            it.size = Some(*n);
+            it
+        })
+        .collect();
+    a.status = if !u.gone {
+        format!("لم تكتمل إزالة «{}»: ما زال في قائمة البرامج", u.name)
+    } else if u.leftovers.is_empty() {
+        format!("أُزيل «{}»، ولم يُعثر على بقايا", u.name)
+    } else {
+        format!("أُزيل «{}». بقايا محتملة: اختر ما تحذفه بـ Delete (إلى سلة المحذوفات)", u.name)
+    };
+    a.sel = 0;
+    a.top = 0;
+    layout();
+}
+
 fn on_deleted(d: Box<Deleted>) {
     use qasd::clean::Way;
     let a = app();
@@ -1889,6 +2104,7 @@ fn context_menu(i: usize, at: Option<POINT>) {
     let a = app();
     let Some(it) = a.items.get(i).filter(|it| !it.history) else { return };
     let path = it.path.clone();
+    let program = it.program.is_some();
     a.sel = i;
     unsafe { InvalidateRect(a.hwnd, std::ptr::null(), 0) };
     let pt = at.unwrap_or_else(|| {
@@ -1897,6 +2113,24 @@ fn context_menu(i: usize, at: Option<POINT>) {
         unsafe { ClientToScreen(a.hwnd, &mut p) };
         p
     });
+    if program {
+        unsafe {
+            let m = CreatePopupMenu();
+            let (remove, folder) = (w("إزالة البرنامج…\tDelete"), w("فتح مجلد التثبيت"));
+            AppendMenuW(m, MF_STRING, CMD_DELETE as usize, remove.as_ptr());
+            AppendMenuW(m, MF_STRING, CMD_REVEAL as usize, folder.as_ptr());
+            a.menu_up = true;
+            let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LAYOUTRTL, pt.x, pt.y, 0, a.hwnd, std::ptr::null()) as u32;
+            a.menu_up = false;
+            DestroyMenu(m);
+            match cmd {
+                CMD_DELETE => uninstall(i),
+                CMD_REVEAL => open(i, false),
+                _ => {}
+            }
+        }
+        return;
+    }
     unsafe {
         let m = CreatePopupMenu();
         let reveal = w("فتح موقع الملف");
@@ -2061,6 +2295,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_DELETED => {
             on_deleted(unsafe { Box::from_raw(lp as *mut Deleted) });
+            0
+        }
+        WM_UNINSTALLED => {
+            on_uninstalled(unsafe { Box::from_raw(lp as *mut Uninstalled) });
             0
         }
         WM_RBUTTONUP => {
