@@ -367,6 +367,9 @@ impl Engine {
     /// Name search.
     pub fn search(&self, q: &Query) -> Result<Vec<Found>, String> {
         WARM_UNTIL.store(0, Ordering::Relaxed);
+        if q.dupes {
+            return self.dupes(q);
+        }
         let (found, early) = self.s.with_names(q.scope.as_deref(), |live| {
             let mut p = Vec::new();
             search_pool()
@@ -390,6 +393,24 @@ impl Engine {
                 .collect()
         })?;
         self.s.index_first(early);
+        Ok(found)
+    }
+
+    /// `dupe:`: the files `q` names that have a copy, group after group
+    /// (see `dupes`). Picked under the lock, read after releasing it.
+    fn dupes(&self, q: &Query) -> Result<Vec<Found>, String> {
+        let (cands, early) = self.s.with_names(q.scope.as_deref(), |live| search_pool().install(|| crate::dupes::candidates(live, q)))?;
+        self.s.index_first(early);
+        let _hold = walk::Hold::new();
+        let groups = search_pool().install(|| crate::dupes::groups(cands));
+        let mut found = Vec::new();
+        for (n, g) in groups.into_iter().enumerate() {
+            // Whole groups only: a group cut short would look like no copy.
+            if !found.is_empty() && found.len() + g.len() > q.limit {
+                break;
+            }
+            found.extend(g.into_iter().map(|c| Found { path: crate::sys::os(&c.path), kind: c.kind, size: c.size, mtime: c.mtime, score: -(n as i32) }));
+        }
         Ok(found)
     }
 

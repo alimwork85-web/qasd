@@ -103,6 +103,8 @@ qasd "git:modified in:~\Projects\app"     # git status filters
 - `'exact` matches exactly.
 - `^prefix` matches the start of a name, and `suffix$` matches the end.
 - `!exclude` leaves out matches.
+- Arabic words also match their other common spellings: with or without hamza (ا أ إ), ة or ه, ى or ي, and with or without diacritics. `اسامه` finds `أسامة`.
+- A word typed with the wrong keyboard layout still finds what you meant: `قثشيةث` finds `readme`, and `sghl` finds `سلام`.
 - A phrase with spaces goes in quotes, for example `grep:"fn main"`.
 
 **Filters:**
@@ -119,6 +121,7 @@ qasd "git:modified in:~\Projects\app"     # git status filters
 | `grep:` | Text inside files |
 | `regex:` | Regex inside files |
 | `sym:` | Symbol definitions |
+| `dupe:` | Files with an identical copy elsewhere, grouped (1 MB or larger; system, program and AppData folders are left out). Combine it with other filters: `dupe: in:~\Pictures type:image` |
 | `limit:` | Maximum number of results |
 | `git:` | Git status: `modified`, `staged`, `untracked`, `clean`, `tracked`, `ignored`, `conflict` |
 
@@ -308,6 +311,7 @@ Short version: open an issue for bugs and ideas, run `cargo fmt` and `cargo test
 qasd تقرير                          # بالاسم
 qasd "ext:md grep:الميزانية"         # داخل الملفات
 qasd "in:~\Desktop pdf"             # داخل مجلد محدد
+qasd "dupe: in:~\Pictures"         # الصور المكررة
 ```
 
 **التشغيل التلقائي:** `qasd install --login` يجعل الخدمة تعمل عند تسجيل الدخول. وإذا شغّلته من طرفية بصلاحيات المدير فستُفهرَس أيضاً المجلدات التي لا يقرؤها إلا المدير.

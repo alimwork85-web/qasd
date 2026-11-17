@@ -404,6 +404,8 @@ pub struct Query {
     /// English, see `other_layout`): searched only when the words as typed
     /// find nothing well.
     pub layout: Vec<Token>,
+    /// `dupe:`: only files with a copy elsewhere (see `dupes`).
+    pub dupes: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -626,6 +628,7 @@ impl Query {
             }
             "re" => self.name_re = Some(regex::bytes::Regex::new(&format!("(?i){v}")).map_err(|e| e.to_string())?),
             "path" => self.path_re = Some(regex::bytes::Regex::new(&format!("(?i){v}")).map_err(|e| e.to_string())?),
+            "dupe" | "dupes" => self.dupes = true,
             "limit" => self.limit = v.parse().map_err(|_| "bad limit")?,
             "grep" | "content" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Literal),
             "regex" => (self.grep, self.grep_mode) = (Some(v.to_string()), GrepMode::Regex),
