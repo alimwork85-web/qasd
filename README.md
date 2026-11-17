@@ -1,5 +1,7 @@
 # Qasd (قَصْد)
 
+![Qasd: whole-disk file search for Windows](assets/banner.svg)
+
 [![Release](https://img.shields.io/github/v/release/alimwork85-web/qasd?color=2a78d6)](https://github.com/alimwork85-web/qasd/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/alimwork85-web/qasd/total?color=2a78d6)](https://github.com/alimwork85-web/qasd/releases)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?logo=windows)](https://github.com/alimwork85-web/qasd/releases/latest)
@@ -57,7 +59,11 @@ qasd "ext:pdf invoice"         # by name and format
 
 ## Search window (Alt+Q)
 
-Press **Alt+Q** anywhere. A search box opens over whatever you are doing, and results update as you type. Each result shows its file icon and folder.
+Press **Alt+Q** anywhere. A search box opens over whatever you are doing, and results update as you type. Each result shows its file icon and folder, with the part that matched your words in blue.
+
+![The search window in dark mode, with the preview pane](assets/window-dark.png)
+
+![The search window in light mode](assets/window-light.png)
 
 | Key | Action |
 | --- | --- |
@@ -81,7 +87,8 @@ Press **Alt+Q** anywhere. A search box opens over whatever you are doing, and re
 - Files you open rank higher in future searches.
 - The app lives in the system tray. Right-click the tray icon to start with Windows or quit.
 - It is plain Win32, so it opens instantly and uses a few MB of memory.
-- It follows the system's light or dark theme and DPI settings.
+- It follows the system's light or dark theme and DPI settings. Menus, confirmations and the tray icon follow it too.
+- Motion is short and rare: the window fades in, disk usage bars grow, previews fade in. All of it stops when Windows' "Animation effects" setting is off.
 
 ---
 

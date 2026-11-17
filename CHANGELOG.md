@@ -4,6 +4,34 @@ Qasd — by **Ali Alhumedi**. Built on [fsearch](https://github.com/noahdunnagan
 
 ---
 
+## v0.9.0 — 2026-11-16
+
+### بالعربية
+
+**شكل جديد للنافذة (Alt+Q)، والوظائف كما هي:**
+
+1. **أيقونة جديدة:** حرف Q عريض يقطع ذيلُه الحلقة، فهو أول حرف من اسم Qasd وعدسة بحث في الوقت نفسه. وفي شريط المهام رمز أبيض أو أسود يتبع لون الشريط.
+2. **حواف ناعمة** لكل العناصر المستديرة، بعد أن كانت مسنّنة، وزاوية واحدة موحّدة في كل مكان.
+3. **ألوان من الأيقونة:** أزرق واحد للتمييز، ورماديات مائلة إلى الزرقة، وإطار رفيع حول النافذة.
+4. **الجزء المطابق من اسم الملف يظهر بالأزرق**، فتُقرأ النتائج أسرع.
+5. **خطوط أوضح:** Segoe UI Variable لأسماء الملفات، ونص عربي أكبر قليلًا في الأزرار والتذييل.
+6. **سجل البحث** صار سطرًا واحدًا لكل عملية بحث سابقة، فيتسع لعدد أكبر.
+7. **أيقونات لأزرار البحث الجاهز**، ومفاتيح الاختصار في التذييل داخل إطارات صغيرة.
+8. **مؤشر تمرير** رفيع عند وجود نتائج أكثر مما يظهر، وشاشة واضحة عند عدم وجود نتائج.
+9. **رسائل التأكيد** (الحذف وإزالة البرامج) بشكل قصد نفسه وبالوضع الداكن، بدل رسائل ويندوز القديمة. وقوائم الزر الأيمن داكنة في الوضع الداكن.
+10. **حركة قليلة ومقصودة:** النافذة تظهر بتلاشٍ قصير، وأشرطة حجم القرص تمتلئ، والمعاينة تظهر بتلاشٍ. تتوقف كلها إذا أُطفئت «تأثيرات الحركة» في ويندوز.
+11. **زر إغلاق المعاينة** انتقل إلى جانب اسم الملف، فلم يعد يغطي النص.
+
+## English
+
+**A new look for the window (Alt+Q); nothing else changed:** a new icon (a bold Q whose tail cuts the ring) and a one-colour tray icon that follows the taskbar; smooth rounded corners with one radius; colours taken from the icon and a thin window border; the matched part of each name in blue; Segoe UI Variable for names and larger Arabic labels; one-line recent searches; icons on the ready-made searches and key caps in the footer; a scroll mark and a "no results" state; confirmations in Qasd's own look, and dark menus in dark mode; a short fade-in, growing disk usage bars and fading previews (off with Windows' animation setting).
+
+**Update:** unzip and run `install.cmd`.
+
+Developer / المطوّر: **Ali Alhumedi**
+
+---
+
 ## v0.8.0 — 2026-11-16
 
 ### بالعربية

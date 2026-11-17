@@ -1,6 +1,6 @@
 [package]
 name = "qasd"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Ali Alhumedi"]
 edition = "2024"
 license = "MIT"
